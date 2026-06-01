@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import traceback
 from pathlib import Path
 import discord
@@ -36,6 +37,31 @@ def load_user_languages() -> dict:
         print(f"[Storage] failed to load user languages: {e}")
     return {}
 
+CHINESE_CHAR_REGEX = re.compile(r"[\u4e00-\u9fff]")
+CHINESE_LANGUAGE_ALIASES = {
+    "zh": "zh-CN",
+    "zh-Hans": "zh-CN",
+    "zh-Hant": "zh-TW",
+}
+
+def normalize_language_code(code: str) -> str:
+    if not code:
+        return "en"
+    return CHINESE_LANGUAGE_ALIASES.get(code, code)
+
+
+def is_chinese_text(text: str) -> bool:
+    return bool(CHINESE_CHAR_REGEX.search(text))
+
+
+def translate_text(text: str, target_lang: str) -> str:
+    target_lang = normalize_language_code(target_lang)
+    source_lang = "auto"
+    if is_chinese_text(text) and target_lang not in {"zh-CN", "zh-TW"}:
+        source_lang = "zh-CN"
+    return GoogleTranslator(source=source_lang, target=target_lang).translate(text)
+
+
 def save_user_languages() -> None:
     try:
         tmp = USER_LANG_FILE.with_suffix(".json.tmp")
@@ -66,7 +92,7 @@ class TranslateButtonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(style=discord.ButtonStyle.primary, label="Translate", custom_id="translate_button")
+    @discord.ui.button(style=discord.ButtonStyle.secondary, label="A → 文", custom_id="translate_button")
     async def translate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         target_lang = user_languages.get(interaction.user.id, "en")
         if not target_lang:
@@ -93,9 +119,8 @@ class TranslateButtonView(discord.ui.View):
                 await interaction.response.defer(ephemeral=True)
                 print(f"[Button] deferred interaction {interaction.id}")
 
-            translated_text = GoogleTranslator(source="auto", target=target_lang).translate(original_message.content)
+            translated_text = translate_text(original_message.content, target_lang)
             embed = discord.Embed(description=translated_text, color=discord.Color.blue())
-            embed.set_footer(text=f"From #{original_message.channel.name}")
             await send_response(interaction, embed=embed, ephemeral=True)
             print(f"[Button] response sent for interaction {interaction.id}")
         except Exception as e:
@@ -133,7 +158,8 @@ async def on_message(message: discord.Message):
     app_commands.Choice(name="Lithuanian", value="lt"),
     app_commands.Choice(name="German", value="de"),
     app_commands.Choice(name="Spanish", value="es"),
-    app_commands.Choice(name="Traditional Chinese", value="zh-TW"),
+    app_commands.Choice(name="Chinese (Simplified)", value="zh-CN"),
+    app_commands.Choice(name="Taiwan (Traditional Chinese)", value="zh-TW"),
     app_commands.Choice(name="Japanese", value="ja"),
     app_commands.Choice(name="Korean", value="ko"),
     app_commands.Choice(name="Swedish", value="sv"),
@@ -175,8 +201,8 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         except Exception as defer_error:
             print(f"[Context Menu] defer failed: {defer_error}")
 
-        translated_text = GoogleTranslator(source="auto", target=target_lang).translate(message.content)
-        
+        translated_text = translate_text(message.content, target_lang)
+
         # Create a simple Embed with just the translation
         embed = discord.Embed(description=translated_text, color=discord.Color.blue())
 
@@ -186,6 +212,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
     except Exception as e:
         traceback.print_exc()
         await send_response(interaction, content=f"An error occurred while translating: {str(e)}", ephemeral=True)
+
 
 def load_token() -> str:
     token = os.getenv("DISCORD_TOKEN")
