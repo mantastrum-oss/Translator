@@ -154,17 +154,17 @@ async def on_message(message: discord.Message):
 # 1. Command: Select your preferred translation language
 @client.tree.command(name="language", description="Select the language you want to translate messages into.")
 @app_commands.choices(choice=[
+    app_commands.Choice(name="Deutsch", value="de"),
     app_commands.Choice(name="English", value="en"),
-    app_commands.Choice(name="Lithuanian", value="lt"),
-    app_commands.Choice(name="German", value="de"),
-    app_commands.Choice(name="Spanish", value="es"),
-    app_commands.Choice(name="Chinese (Simplified)", value="zh-CN"),
-    app_commands.Choice(name="Taiwan (Traditional Chinese)", value="zh-TW"),
-    app_commands.Choice(name="Japanese", value="ja"),
-    app_commands.Choice(name="Korean", value="ko"),
-    app_commands.Choice(name="Swedish", value="sv"),
-    app_commands.Choice(name="Portuguese", value="pt"),
-    app_commands.Choice(name="French", value="fr"),
+    app_commands.Choice(name="Español", value="es"),
+    app_commands.Choice(name="Français", value="fr"),
+    app_commands.Choice(name="Lietuvių", value="lt"),
+    app_commands.Choice(name="Português", value="pt"),
+    app_commands.Choice(name="Svenska", value="sv"),
+    app_commands.Choice(name="简体中文 (Simplified)", value="zh-CN"),
+    app_commands.Choice(name="繁體中文 (Traditional Chinese)", value="zh-TW"),
+    app_commands.Choice(name="日本語", value="ja"),
+    app_commands.Choice(name="한국어", value="ko"),
 ])
 async def set_language(interaction: discord.Interaction, choice: app_commands.Choice[str]):
     # Save the user's language preference
