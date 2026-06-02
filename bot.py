@@ -27,6 +27,10 @@ client = TranslatorBot()
 
 # Persistence for user language preferences (file-based)
 USER_LANG_FILE = Path(__file__).with_name("user_languages.json")
+SETTINGS_FILE = Path(__file__).with_name("settings.json")
+DEFAULT_SETTINGS = {
+    "translate_buttons_enabled": True,
+}
 
 def load_user_languages() -> dict:
     try:
@@ -37,6 +41,24 @@ def load_user_languages() -> dict:
         print(f"[Storage] failed to load user languages: {e}")
     return {}
 
+
+def load_settings() -> dict:
+    try:
+        if SETTINGS_FILE.exists():
+            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[Storage] failed to load settings: {e}")
+    return DEFAULT_SETTINGS.copy()
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        tmp = SETTINGS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(SETTINGS_FILE)
+    except Exception as e:
+        print(f"[Storage] failed to save settings: {e}")
+
 CHINESE_CHAR_REGEX = re.compile(r"[\u4e00-\u9fff]")
 CHINESE_LANGUAGE_ALIASES = {
     "zh": "zh-CN",
@@ -44,10 +66,29 @@ CHINESE_LANGUAGE_ALIASES = {
     "zh-Hant": "zh-TW",
 }
 
+FLAG_LANGUAGE_MAP = {
+    "🇩🇪": "de",
+    "🇬🇧": "en",
+    "🇺🇸": "en",
+    "🇪🇸": "es",
+    "🇫🇷": "fr",
+    "🇱🇹": "lt",
+    "🇵🇹": "pt",
+    "🇸🇪": "sv",
+    "🇨🇳": "zh-CN",
+    "🇹🇼": "zh-TW",
+    "🇯🇵": "ja",
+    "🇰🇷": "ko",
+}
+
 def normalize_language_code(code: str) -> str:
     if not code:
         return "en"
     return CHINESE_LANGUAGE_ALIASES.get(code, code)
+
+
+def language_from_flag(emoji: str) -> str | None:
+    return FLAG_LANGUAGE_MAP.get(emoji)
 
 
 def is_chinese_text(text: str) -> bool:
@@ -74,6 +115,37 @@ def save_user_languages() -> None:
 # Dictionary to store user language preferences in-memory
 # Structure: {user_id: "language_code"}
 user_languages = load_user_languages()
+settings = load_settings()
+translate_buttons_enabled = settings.get("translate_buttons_enabled", True)
+
+
+def set_global_translate_buttons(enabled: bool) -> None:
+    """Enable or disable translate buttons globally."""
+    global settings
+    settings["translate_buttons_enabled"] = bool(enabled)
+    save_settings(settings)
+
+
+def set_channel_translate_buttons(channel_id: int, enabled: bool) -> None:
+    """Set translate button behavior for a specific channel.
+
+    Stores per-channel overrides in settings['channel_overrides'] as string keys.
+    """
+    global settings
+    overrides = settings.setdefault("channel_overrides", {})
+    overrides[str(channel_id)] = bool(enabled)
+    save_settings(settings)
+
+
+def is_translate_buttons_enabled(channel_id: int) -> bool:
+    """Return whether translate buttons are enabled for the given channel.
+
+    Per-channel override takes precedence over the global setting.
+    """
+    overrides = settings.get("channel_overrides", {})
+    if str(channel_id) in overrides:
+        return bool(overrides[str(channel_id)])
+    return bool(settings.get("translate_buttons_enabled", True))
 
 async def send_response(interaction: discord.Interaction, **kwargs):
     try:
@@ -137,8 +209,8 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
-    # Ignore bot messages
-    if message.author.bot or not message.content:
+    # Ignore bot messages and disabled button feature (supports per-channel overrides)
+    if message.author.bot or not message.content or not is_translate_buttons_enabled(message.channel.id):
         return
     
     try:
@@ -150,6 +222,36 @@ async def on_message(message: discord.Message):
         )
     except Exception as e:
         print(f"[Translate] error creating translate button: {e}")
+
+@client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == client.user.id:
+        return
+
+    flag_lang = language_from_flag(payload.emoji.name)
+    if not flag_lang:
+        return
+
+    try:
+        channel = client.get_channel(payload.channel_id)
+        if channel is None:
+            return
+
+        message = await channel.fetch_message(payload.message_id)
+        if not message.content:
+            return
+
+        translated_text = translate_text(message.content, flag_lang)
+        embed = discord.Embed(
+            description=translated_text,
+            color=discord.Color.blue(),
+        )
+        await message.reply(
+            embed=embed,
+            mention_author=False,
+        )
+    except Exception as e:
+        traceback.print_exc()
 
 # 1. Command: Select your preferred translation language
 @client.tree.command(name="language", description="Select the language you want to translate messages into.")
@@ -178,6 +280,57 @@ async def set_language(interaction: discord.Interaction, choice: app_commands.Ch
     await interaction.response.send_message(
         f"Your translation language is now set to: **{choice.name}**.",
         ephemeral=True
+    )
+
+# 2. Command: Enable or disable auto translate buttons on new messages
+@client.tree.command(name="translate_button", description="Enable or disable translate buttons on new messages.")
+@app_commands.choices(state=[
+    app_commands.Choice(name="On", value="on"),
+    app_commands.Choice(name="Off", value="off"),
+])
+async def toggle_translate_button(interaction: discord.Interaction, state: app_commands.Choice[str]):
+    # Permission check: only server administrators may change this
+    user = interaction.user
+    if not getattr(user, "guild_permissions", None) or not user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be a server administrator to change this setting.",
+            ephemeral=True,
+        )
+        return
+
+    set_global_translate_buttons(state.value == "on")
+    status = "enabled" if state.value == "on" else "disabled"
+    await interaction.response.send_message(
+        f"Translate buttons are now **{status}**.",
+        ephemeral=True,
+    )
+
+
+@client.tree.command(name="translate_button_channel", description="Enable or disable translate buttons for a specific channel.")
+@app_commands.describe(channel="The channel to update")
+@app_commands.choices(state=[
+    app_commands.Choice(name="On", value="on"),
+    app_commands.Choice(name="Off", value="off"),
+])
+async def toggle_translate_button_channel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    state: app_commands.Choice[str],
+):
+    # Permission check: only server administrators may change channel settings
+    user = interaction.user
+    if not getattr(user, "guild_permissions", None) or not user.guild_permissions.administrator:
+        await interaction.response.send_message(
+            "You must be a server administrator to change channel settings.",
+            ephemeral=True,
+        )
+        return
+
+    set_channel_translate_buttons(channel.id, state.value == "on")
+    status = "enabled" if state.value == "on" else "disabled"
+    await interaction.response.send_message(
+        f"Translate buttons for {channel.mention} are now **{status}**.",
+        ephemeral=True,
     )
 
 # 3. Context Menu command: Right-click on any message -> Apps -> Translate
