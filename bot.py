@@ -25,39 +25,94 @@ class TranslatorBot(discord.Client):
 
 client = TranslatorBot()
 
-# Persistence for user language preferences (file-based)
-USER_LANG_FILE = Path(__file__).with_name("user_languages.json")
-SETTINGS_FILE = Path(__file__).with_name("settings.json")
+# Persistence for user language preferences and bot settings (single file)
+STATE_FILE = Path(__file__).with_name("bot_data.json")
+LEGACY_USER_LANG_FILE = Path(__file__).with_name("user_languages.json")
+LEGACY_SETTINGS_FILE = Path(__file__).with_name("settings.json")
 DEFAULT_SETTINGS = {
     "translate_buttons_enabled": True,
 }
+DEFAULT_STATE = {
+    "user_languages": {},
+    "settings": DEFAULT_SETTINGS.copy(),
+}
+
+
+def load_state() -> dict:
+    state = {
+        "user_languages": {},
+        "settings": DEFAULT_SETTINGS.copy(),
+    }
+
+    try:
+        if STATE_FILE.exists():
+            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                user_languages_raw = raw.get("user_languages", raw.get("users", {}))
+                if isinstance(user_languages_raw, dict):
+                    state["user_languages"] = {int(k): v for k, v in user_languages_raw.items()}
+                settings_raw = raw.get("settings", {})
+                if isinstance(settings_raw, dict):
+                    state["settings"] = {**DEFAULT_SETTINGS, **settings_raw}
+                else:
+                    state["settings"] = DEFAULT_SETTINGS.copy()
+                return state
+    except Exception as e:
+        print(f"[Storage] failed to load bot state: {e}")
+
+    try:
+        if LEGACY_USER_LANG_FILE.exists():
+            raw = json.loads(LEGACY_USER_LANG_FILE.read_text(encoding="utf-8"))
+            state["user_languages"] = {int(k): v for k, v in raw.items()}
+    except Exception as e:
+        print(f"[Storage] failed to load legacy user languages: {e}")
+
+    try:
+        if LEGACY_SETTINGS_FILE.exists():
+            raw = json.loads(LEGACY_SETTINGS_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                state["settings"] = {**DEFAULT_SETTINGS, **raw}
+    except Exception as e:
+        print(f"[Storage] failed to load legacy settings: {e}")
+
+    save_state(state)
+
+    try:
+        if LEGACY_USER_LANG_FILE.exists():
+            LEGACY_USER_LANG_FILE.unlink(missing_ok=True)
+        if LEGACY_SETTINGS_FILE.exists():
+            LEGACY_SETTINGS_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[Storage] failed to delete legacy files: {e}")
+
+    return state
+
+
+def save_state(state: dict) -> None:
+    try:
+        payload = {
+            "user_languages": {str(k): v for k, v in state.get("user_languages", {}).items()},
+            "settings": state.get("settings", DEFAULT_SETTINGS.copy()),
+        }
+        tmp = STATE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(STATE_FILE)
+    except Exception as e:
+        print(f"[Storage] failed to save bot state: {e}")
+
 
 def load_user_languages() -> dict:
-    try:
-        if USER_LANG_FILE.exists():
-            raw = json.loads(USER_LANG_FILE.read_text(encoding="utf-8"))
-            return {int(k): v for k, v in raw.items()}
-    except Exception as e:
-        print(f"[Storage] failed to load user languages: {e}")
-    return {}
+    return load_state().get("user_languages", {})
 
 
 def load_settings() -> dict:
-    try:
-        if SETTINGS_FILE.exists():
-            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"[Storage] failed to load settings: {e}")
-    return DEFAULT_SETTINGS.copy()
+    return load_state().get("settings", DEFAULT_SETTINGS.copy())
 
 
 def save_settings(settings: dict) -> None:
-    try:
-        tmp = SETTINGS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(SETTINGS_FILE)
-    except Exception as e:
-        print(f"[Storage] failed to save settings: {e}")
+    state = load_state()
+    state["settings"] = settings
+    save_state(state)
 
 CHINESE_CHAR_REGEX = re.compile(r"[\u4e00-\u9fff]")
 CHINESE_LANGUAGE_ALIASES = {
@@ -111,13 +166,9 @@ def translate_text(text: str, target_lang: str) -> str:
 
 
 def save_user_languages() -> None:
-    try:
-        tmp = USER_LANG_FILE.with_suffix(".json.tmp")
-        raw = {str(k): v for k, v in user_languages.items()}
-        tmp.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(USER_LANG_FILE)
-    except Exception as e:
-        print(f"[Storage] failed to save user languages: {e}")
+    state = load_state()
+    state["user_languages"] = user_languages
+    save_state(state)
 
 # Dictionary to store user language preferences in-memory
 # Structure: {user_id: "language_code"}

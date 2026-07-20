@@ -1,4 +1,4 @@
 .venv/
 __pycache__/
 token.txt
-user_languages.json
+bot_data.json

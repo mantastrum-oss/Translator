@@ -7,7 +7,7 @@ A simple Discord bot that attaches a translate button to messages and provides e
 - Automatically adds a translate button to each visible message
 - Users choose their preferred language with `/language`
 - Translation results are sent as ephemeral responses so only the requester sees them
-- User language preferences are saved to `user_languages.json`
+- User language preferences and bot settings are saved to `bot_data.json`
 
 ## Supported languages
 
@@ -38,7 +38,13 @@ pip install -r requirements.txt
 
 3. Create a `token.txt` file with your Discord bot token, or set the `DISCORD_TOKEN` environment variable.
 
-4. Run the bot:
+4. If you want to use a database, set `DATABASE_URL` and initialize the schema:
+
+```powershell
+python init_db.py
+```
+
+5. Run the bot:
 
 ```powershell
 python bot.py
@@ -62,5 +68,5 @@ If you use Git, add these lines to `.gitignore`:
 .venv/
 __pycache__/
 token.txt
-user_languages.json
+bot_data.json
 ```
