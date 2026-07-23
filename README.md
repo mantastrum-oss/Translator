@@ -1,26 +1,46 @@
 # Translator Discord Bot
 
-A simple Discord bot that attaches a translate button to messages and provides ephemeral translations on demand.
+A Discord bot that adds translation actions to messages and returns user-specific translations.
 
 ## Features
 
-- Automatically adds a translate button to each visible message
-- Users choose their preferred language with `/language`
-- Translation results are sent as ephemeral responses so only the requester sees them
-- User language preferences and bot settings are saved to `bot_data.json`
+- Automatically adds an `A → 文` translate button to new messages (when enabled)
+- Supports translation from the message button and from the message context menu (`Apps -> Translate`)
+- Supports reaction-based translation with `🌐` (globe emoji)
+- Uses each user's saved target language preference
+- If a user has no saved language, shows a language dropdown selector
+- Supports per-server and per-channel translate button toggles
+- Localizes key UI messages based on Discord locale
 
-## Supported languages
+## Translation target languages
 
-- English
-- Lithuanian
-- German
-- Spanish
-- Traditional Chinese
-- Japanese
-- Korean
-- Swedish
-- Portuguese
-- French
+The language selector supports 25 target languages (Discord select menu max):
+
+- Deutsch (`de`)
+- English (`en`)
+- Espanol (`es`)
+- Francais (`fr`)
+- Lietuviu (`lt`)
+- Portugues (`pt`)
+- Svenska (`sv`)
+- Italiano (`it`)
+- Nederlands (`nl`)
+- Tieng Viet (`vi`)
+- Filipino (`tl`)
+- Chinese Simplified (`zh-CN`)
+- Chinese Traditional (`zh-TW`)
+- Japanese (`ja`)
+- Korean (`ko`)
+- Polish (`pl`)
+- Russian (`ru`)
+- Ukrainian (`uk`)
+- Arabic (`ar`)
+- Hindi (`hi`)
+- Turkish (`tr`)
+- Indonesian (`id`)
+- Thai (`th`)
+- Czech (`cs`)
+- Romanian (`ro`)
 
 ## Local setup
 
@@ -36,45 +56,14 @@ A simple Discord bot that attaches a translate button to messages and provides e
 pip install -r requirements.txt
 ```
 
-3. Create a `.env` file (or rename `.env.sample` to `.env`) with your Discord credentials:
-
-```env
-DISCORD_TOKEN=your-bot-token-here
-DISCORD_PUBLIC_KEY=your-public-key-here
-DISCORD_APP_ID=your-app-id-here
-```
-
-The bot reads these values from `.env` automatically. `token.txt` is no longer required.
-
-4. If you want to use a database, set `DATABASE_URL` and initialize the schema:
-
-```powershell
-python init_db.py
-```
-
-5. Run the bot:
-
-```powershell
-python bot.py
-```
-
 ## Commands
 
-- `/language` — choose your preferred translation language
-- Right-click a message and use the `Translate` context menu entry to translate text
+- `/language` - choose your preferred translation target language
+- `/translate_button` - enable or disable auto translate buttons for the current server (admin)
+- `/translate_button_channel` - enable or disable auto translate buttons for a specific channel (admin)
+- Message context menu `Translate` - translate the selected message
 
-## Security
+## Reaction flow
 
-- Always keep `DISCORD_TOKEN` secret.
-- Do not commit `token.txt` or any credentials to GitHub.
-
-## Recommended `.gitignore`
-
-If you use Git, add these lines to `.gitignore`:
-
-```
-.venv/
-__pycache__/
-token.txt
-bot_data.json
-```
+- React to a message with `🌐` to request translation in your saved target language.
+- If no language is saved, the bot sends a language selector first.
