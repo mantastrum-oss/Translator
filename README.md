@@ -36,7 +36,15 @@ A simple Discord bot that attaches a translate button to messages and provides e
 pip install -r requirements.txt
 ```
 
-3. Create a `token.txt` file with your Discord bot token, or set the `DISCORD_TOKEN` environment variable.
+3. Create a `.env` file (or rename `.env.sample` to `.env`) with your Discord credentials:
+
+```env
+DISCORD_TOKEN=your-bot-token-here
+DISCORD_PUBLIC_KEY=your-public-key-here
+DISCORD_APP_ID=your-app-id-here
+```
+
+The bot reads these values from `.env` automatically. `token.txt` is no longer required.
 
 4. If you want to use a database, set `DATABASE_URL` and initialize the schema:
 
