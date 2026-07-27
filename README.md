@@ -2,6 +2,11 @@
 
 A Discord bot that adds translation actions to messages and returns user-specific translations.
 
+## Project updates
+
+- See [CHANGELOG.md](CHANGELOG.md) for release notes and detailed change history.
+- Latest: emoji translation artifact fix and Discord emoji markdown normalization.
+
 ## Features
 
 - Automatically adds an `A → 文` translate button to new messages (when enabled)

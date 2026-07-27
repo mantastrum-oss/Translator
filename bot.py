@@ -193,31 +193,40 @@ EMOJI_PATTERN = re.compile(
     re.UNICODE
 )
 
-def extract_emojis_and_preserve_text(text: str) -> tuple[str, list[tuple[int, str]]]:
-    """Extract emojis from text and replace with placeholders. Returns: (text_without_emojis, [(position, emoji), ...])"""
-    emojis = []
-    text_without_emojis = text
-    
-    for match in EMOJI_PATTERN.finditer(text):
-        emojis.append((match.start(), match.group()))
-    
-    # Replace emojis with placeholders (in reverse order to maintain positions)
-    for i, (pos, emoji) in enumerate(reversed(emojis)):
-        placeholder = f" [EMOJI{len(emojis) - i - 1}] "
-        text_without_emojis = text_without_emojis[:pos] + placeholder + text_without_emojis[pos + len(emoji):]
-    
+# Some Discord clients/content can include emoji as markdown images like:
+# ![🫣](https://discord.com/assets/xxxx.svg)
+DISCORD_EMOJI_MARKDOWN_PATTERN = re.compile(
+    r"!\[([^\]]*)\]\(https?://discord\.com/assets/[^)]+\)",
+    re.IGNORECASE,
+)
+
+
+def normalize_discord_emoji_markdown(text: str) -> str:
+    """Convert Discord emoji markdown image syntax to plain emoji text."""
+    return DISCORD_EMOJI_MARKDOWN_PATTERN.sub(lambda m: m.group(1), text)
+
+def extract_emojis_and_preserve_text(text: str) -> tuple[str, list[str]]:
+    """Extract emojis from text and replace with stable placeholders."""
+    emojis: list[str] = []
+
+    def _replace(match: re.Match) -> str:
+        emojis.append(match.group())
+        return f"__EMOJI_{len(emojis) - 1}__"
+
+    text_without_emojis = EMOJI_PATTERN.sub(_replace, text)
     return text_without_emojis, emojis
 
-def restore_emojis(text: str, emojis: list[tuple[int, str]]) -> str:
-    """Restore emojis back into translated text based on placeholder positions."""
+
+def restore_emojis(text: str, emojis: list[str]) -> str:
+    """Restore emojis back into translated text from stable placeholders."""
     if not emojis:
         return text
-    
-    # Find and replace placeholders with emojis
-    for i, (_, emoji) in enumerate(emojis):
-        placeholder = f" [EMOJI{i}] "
-        text = text.replace(placeholder, emoji)
-    
+
+    for i, emoji in enumerate(emojis):
+        text = text.replace(f"__EMOJI_{i}__", emoji)
+        # Backward compatibility for old placeholder style that may still leak through.
+        text = text.replace(f"[EMOJI{i}]", emoji)
+
     return text
 
 CHINESE_LANGUAGE_ALIASES = {
@@ -248,6 +257,7 @@ def is_japanese_text(text: str) -> bool:
 
 def translate_text(text: str, target_lang: str) -> str:
     target_lang = normalize_language_code(target_lang)
+    text = normalize_discord_emoji_markdown(text)
     source_lang = "auto"
     # Prefer Japanese when Hiragana/Katakana are present, even if Kanji also appear.
     if is_japanese_text(text) and target_lang != "ja":
