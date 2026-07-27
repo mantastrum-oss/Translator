@@ -1,0 +1,41 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "noop",
+			"type": "shell",
+			"command": "echo",
+			"args": [
+				"noop"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "noop2",
+			"type": "shell",
+			"command": "echo",
+			"args": [
+				"polish-readme-changelog"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "noop3",
+			"type": "shell",
+			"command": "echo",
+			"args": [
+				"set-gmt-plus-3-logging"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "noop4",
+			"type": "shell",
+			"command": "echo",
+			"args": [
+				"recover-user-settings-from-logs"
+			],
+			"isBackground": false
+		}
+	]
+}

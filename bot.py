@@ -4,7 +4,7 @@ import re
 import ssl
 import traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 
@@ -68,8 +68,9 @@ from deep_translator import GoogleTranslator
 
 
 def get_timestamp() -> str:
-    """Return current time in HH:MM:SS format."""
-    return datetime.now().strftime("%H:%M:%S")
+    """Return current time in HH:MM:SS format using GMT+3."""
+    gmt_plus_3 = timezone(timedelta(hours=3))
+    return datetime.now(gmt_plus_3).strftime("%H:%M:%S")
 
 # Initialize Discord Bot with required intents
 intents = discord.Intents.default()

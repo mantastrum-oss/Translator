@@ -93,3 +93,8 @@ User-facing updates since version 1.0.
 
 - Initial public release with `/language` and message context-menu Translate.
 
+## Policies
+
+- [Terms of Service](TERMS_OF_SERVICE.md)
+- [Privacy Policy](PRIVACY_POLICY.md)
+
