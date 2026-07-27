@@ -58,38 +58,38 @@ The language selector supports 25 target languages (Discord select menu max):
 
 User-facing updates since version 1.0.
 
-## v2.0.1 - 2026-07-27
+### v2.0.1 - 2026-07-27
 
 - Fixed emoji translation artifacts so placeholders no longer appear in translated messages.
 
-## v2.0 - 2026-07-23
+### v2.0 - 2026-07-23
 
 - Added language selection flow when a user has no saved preference.
 - Added support for Arabic, Hindi, Turkish, Indonesian, Thai, Czech, and Romanian.
 - Improved localized user-facing messages and translation button controls.
 
-## v1.2.1 - 2026-07-20
+### v1.2.1 - 2026-07-20
 
 - Improved language preference and settings behavior.
 
-## v1.2 - 2026-06-03
+### v1.2 - 2026-06-03
 
 - Added support for Polish, Russian, Ukrainian, Italian, Dutch, Vietnamese, and Filipino.
 
-## v1.1 - 2026-06-03
+### v1.1 - 2026-06-03
 
 - Added admin controls to enable or disable translation buttons.
 - Added channel-specific translation button control.
 
-## v1.0.2 - 2026-06-02
+### v1.0.2 - 2026-06-02
 
 - Improved language labels and language selection quality.
 
-## v1.0.1 - 2026-06-01
+### v1.0.1 - 2026-06-01
 
 - Improved language options and Chinese language variants.
 
-## v1.0 - 2026-06-01
+### v1.0 - 2026-06-01
 
 - Initial public release with `/language` and message context-menu Translate.
 
