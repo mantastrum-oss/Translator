@@ -2,11 +2,6 @@
 
 A Discord bot that adds translation actions to messages and returns user-specific translations.
 
-## Project updates
-
-- See [CHANGELOG.md](CHANGELOG.md) for release notes and detailed change history.
-- Latest: emoji translation artifact fix and Discord emoji markdown normalization.
-
 ## Features
 
 - Automatically adds an `A → 文` translate button to new messages (when enabled)
@@ -47,20 +42,6 @@ The language selector supports 25 target languages (Discord select menu max):
 - Czech (`cs`)
 - Romanian (`ro`)
 
-## Local setup
-
-1. Activate your virtual environment:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-2. Install dependencies:
-
-```powershell
-pip install -r requirements.txt
-```
-
 ## Commands
 
 - `/language` - choose your preferred translation target language
@@ -72,3 +53,43 @@ pip install -r requirements.txt
 
 - React to a message with `🌐` to request translation in your saved target language.
 - If no language is saved, the bot sends a language selector first.
+
+## Changelog
+
+User-facing updates since version 1.0.
+
+## v2.0.1 - 2026-07-27
+
+- Fixed emoji translation artifacts so placeholders no longer appear in translated messages.
+
+## v2.0 - 2026-07-23
+
+- Added language selection flow when a user has no saved preference.
+- Added support for Arabic, Hindi, Turkish, Indonesian, Thai, Czech, and Romanian.
+- Improved localized user-facing messages and translation button controls.
+
+## v1.2.1 - 2026-07-20
+
+- Improved language preference and settings behavior.
+
+## v1.2 - 2026-06-03
+
+- Added support for Polish, Russian, Ukrainian, Italian, Dutch, Vietnamese, and Filipino.
+
+## v1.1 - 2026-06-03
+
+- Added admin controls to enable or disable translation buttons.
+- Added channel-specific translation button control.
+
+## v1.0.2 - 2026-06-02
+
+- Improved language labels and language selection quality.
+
+## v1.0.1 - 2026-06-01
+
+- Improved language options and Chinese language variants.
+
+## v1.0 - 2026-06-01
+
+- Initial public release with `/language` and message context-menu Translate.
+
