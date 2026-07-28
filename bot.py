@@ -235,17 +235,11 @@ CHINESE_LANGUAGE_ALIASES = {
     "zh-Hans": "zh-CN",
     "zh-Hant": "zh-TW",
 }
-GLOBE_REACTION_EMOJI = "🌐"
 
 def normalize_language_code(code: str) -> str:
     if not code:
         return "en"
     return CHINESE_LANGUAGE_ALIASES.get(code, code)
-
-
-def is_globe_reaction(emoji: str) -> bool:
-    # Discord may include U+FE0F variation selector for some unicode emojis.
-    return emoji.replace("\ufe0f", "") == GLOBE_REACTION_EMOJI
 
 
 def is_chinese_text(text: str) -> bool:
@@ -948,57 +942,6 @@ async def on_message(message: discord.Message):
         )
     except Exception as e:
         print(f"[{get_timestamp()}] [Translate] error creating translate button: {e}")
-
-@client.event
-async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.user_id == client.user.id:
-        return
-
-    if not is_globe_reaction(payload.emoji.name):
-        return
-
-    try:
-        channel = client.get_channel(payload.channel_id)
-        if channel is None:
-            channel = await client.fetch_channel(payload.channel_id)
-
-        message = await channel.fetch_message(payload.message_id)
-        if not message.content:
-            return
-
-        target_lang = user_languages.get(payload.user_id)
-
-        # If no language is saved, show language selection view for this user.
-        if not target_lang:
-            view = LanguageSelectView(
-                original_message=message,
-                user_locale=None,
-                allowed_user_id=payload.user_id,
-            )
-            await message.reply(
-                content=(
-                    f"<@{payload.user_id}> 🌐 **Language Not Set**\n"
-                    "Select your preferred target language below to continue."
-                ),
-                view=view,
-                mention_author=False,
-            )
-            print(f"[{get_timestamp()}] [Reaction] showed language selection for user {payload.user_id}")
-            return
-
-        translated_text = translate_text(message.content, target_lang)
-        embed = discord.Embed(
-            description=translated_text,
-            color=discord.Color.blue(),
-        )
-        await message.reply(
-            content=f"<@{payload.user_id}>",
-            embed=embed,
-            mention_author=False,
-        )
-        print(f"[{get_timestamp()}] [Reaction] translation sent for user {payload.user_id}")
-    except Exception:
-        traceback.print_exc()
 
 # 1. Command: Select your preferred translation language
 @client.tree.command(name="language", description="Select the language you want to translate messages into.")

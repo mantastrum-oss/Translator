@@ -6,7 +6,6 @@ A Discord bot that adds translation actions to messages and returns user-specifi
 
 - Automatically adds an `A → 文` translate button to new messages (when enabled)
 - Supports translation from the message button and from the message context menu (`Apps -> Translate`)
-- Supports reaction-based translation with `🌐` (globe emoji)
 - Uses each user's saved target language preference
 - If a user has no saved language, shows a language dropdown selector
 - Supports per-server and per-channel translate button toggles
@@ -48,11 +47,6 @@ The language selector supports 25 target languages (Discord select menu max):
 - `/translate_button` - enable or disable auto translate buttons for the current server (admin)
 - `/translate_button_channel` - enable or disable auto translate buttons for a specific channel (admin)
 - Message context menu `Translate` - translate the selected message
-
-## Reaction flow
-
-- React to a message with `🌐` to request translation in your saved target language.
-- If no language is saved, the bot sends a language selector first.
 
 ## Changelog
 
