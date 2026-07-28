@@ -664,7 +664,36 @@ class LanguageSelectView(discord.ui.View):
         self.original_message = original_message
         self.user_locale = user_locale
         self.allowed_user_id = allowed_user_id
-        self.translated_message = None
+        self.selected_lang = None
+        
+        # Language code to display name mapping
+        self.lang_names = {
+            "de": "🇩🇪 Deutsch",
+            "en": "🇬🇧 English",
+            "es": "🇪🇸 Español",
+            "fr": "🇫🇷 Français",
+            "lt": "🇱🇹 Lietuvių",
+            "pt": "🇵🇹 Português",
+            "sv": "🇸🇪 Svenska",
+            "it": "🇮🇹 Italiano",
+            "nl": "🇳🇱 Nederlands",
+            "vi": "🇻🇳 Tiếng Việt",
+            "tl": "🇵🇭 Filipino",
+            "zh-CN": "🇨🇳 简体中文",
+            "zh-TW": "🇹🇼 繁體中文",
+            "ja": "🇯🇵 日本語",
+            "ko": "🇰🇷 한국어",
+            "pl": "🇵🇱 Polski",
+            "ru": "🇷🇺 Русский",
+            "uk": "🇺🇦 Українська",
+            "ar": "🇸🇦 العربية",
+            "hi": "🇮🇳 हिन्दी",
+            "tr": "🇹🇷 Türkçe",
+            "id": "🇮🇩 Bahasa Indonesia",
+            "th": "🇹🇭 ไทย",
+            "cs": "🇨🇿 Čeština",
+            "ro": "🇷🇴 Română",
+        }
 
     @discord.ui.select(
         placeholder="Select your target language...",
@@ -707,37 +736,76 @@ class LanguageSelectView(discord.ui.View):
             return
 
         selected_lang = select.values[0]
+        self.selected_lang = selected_lang
         
         try:
-            # Update the select to disabled state
-            select.disabled = True
+            # Defer before processing to avoid timeout
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
             
+            # Save the language immediately when selected
+            user_languages[interaction.user.id] = self.selected_lang
+            try:
+                save_user_languages()
+                print(f"[{get_timestamp()}] [Language Select] saved language {self.selected_lang} for user {interaction.user.id}")
+            except Exception as save_error:
+                print(f"[{get_timestamp()}] [Language Select] failed to save language: {save_error}")
+            
+            # Update the dropdown placeholder to show the selected language
+            lang_display = self.lang_names.get(selected_lang, selected_lang)
+            self.select_language.placeholder = f"✓ {lang_display}"
+            
+            # Update the ephemeral message to show the selected language in the dropdown
+            await interaction.edit_original_response(view=self)
+            
+            print(f"[{get_timestamp()}] [Language Select] language {selected_lang} selected by {interaction.user.id}")
+            
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.followup.send(
+                content=f"An error occurred while updating the view: {str(e)}",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary, label="A → 文", custom_id="translate_lang_button")
+    async def translate_lang_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.allowed_user_id is not None and interaction.user.id != self.allowed_user_id:
+            await send_response(
+                interaction,
+                content="This translator belongs to another user.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.selected_lang:
+            await send_response(
+                interaction,
+                content="Please select a language first.",
+                ephemeral=True,
+            )
+            return
+
+        try:
             # Defer before processing to avoid timeout
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
             
             # Save the selected language to the user's preferences
-            user_languages[interaction.user.id] = selected_lang
+            user_languages[interaction.user.id] = self.selected_lang
             try:
                 save_user_languages()
-                print(f"[{get_timestamp()}] [Language Select] saved language {selected_lang} for user {interaction.user.id}")
+                print(f"[{get_timestamp()}] [Language Select] saved language {self.selected_lang} for user {interaction.user.id}")
             except Exception as save_error:
                 print(f"[{get_timestamp()}] [Language Select] failed to save language: {save_error}")
             
             # Translate the original message with the selected language
-            translated_text = translate_text(self.original_message.content, selected_lang)
+            translated_text = translate_text(self.original_message.content, self.selected_lang)
             embed = discord.Embed(description=translated_text, color=discord.Color.blue())
             
-            # Update the ephemeral message with the translation
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            # Edit the ephemeral message to show the translation
+            await interaction.edit_original_response(embed=embed, view=None)
             
-            # Update the original select message to show it's been processed
-            try:
-                await interaction.message.edit(view=self)
-            except Exception:
-                pass
-            
-            print(f"[{get_timestamp()}] [Language Select] translation sent for {interaction.user.id}")
+            print(f"[{get_timestamp()}] [Language Select] translation shown for {interaction.user.id}")
             
         except Exception as e:
             traceback.print_exc()
@@ -793,8 +861,10 @@ class TranslateButtonView(discord.ui.View):
                         "Select your preferred target language below to continue."
                     )
                     
-                    # Create and show the language select view
+                    # Create the language select view
                     view = LanguageSelectView(original_message, interaction.locale)
+                    
+                    # Send ephemeral message with the language selector
                     await interaction.followup.send(
                         content=f"{title}\n\n{prompt}",
                         view=view,
@@ -811,6 +881,7 @@ class TranslateButtonView(discord.ui.View):
                     )
                 return
 
+            # Language is already saved, translate and show result
             deferred = False
             if not interaction.response.is_done():
                 try:
@@ -829,11 +900,11 @@ class TranslateButtonView(discord.ui.View):
 
             translated_text = translate_text(original_message.content, target_lang)
             embed = discord.Embed(description=translated_text, color=discord.Color.blue())
-            if interaction.response.is_done() and not deferred:
-                print(f"[{get_timestamp()}] [Button] interaction already acknowledged; skipping follow-up response for {interaction.id}")
-                return
-            await send_response(interaction, embed=embed, ephemeral=True)
-            print(f"[{get_timestamp()}] [Button] response sent for interaction {interaction.id}")
+            
+            # Send ephemeral message with the translation
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            print(f"[{get_timestamp()}] [Button] translation shown for interaction {interaction.id}")
+            
         except Exception as e:
             traceback.print_exc()
             await send_response(
