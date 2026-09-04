@@ -1,0 +1,234 @@
+# Translation API Fallback & Resilience Specification
+
+## Executive Summary
+This document outlines the technical specification, setup instructions, architecture design, and production code implementation for an ultra-resilient Python translation bot. It resolves API rate limits and character quotas using a multi-provider fallback strategy, persistent TTL caching, per-user rate limiting, exponential backoff retries, and localized response handling tailored for Discord bot environments.
+
+---
+
+## 1. System Architecture Diagram
+
+```text
+[ User Request (Discord Message) ]
+                │
+                ▼
+    [ Input Validation & Truncation ] ──(Exceeds 1900 Chars)──► Return Length Warning
+                │
+             (Valid)
+                │
+                ▼
+        [ Cache Layer (Diskcache) ] ──(Hit)──► Return Cached Translation
+                │
+             (Miss)
+                │
+                ▼
+   [ Fallback Translation Pipeline ]
+        ├── Step 1: GoogleTranslator (deep-translator) + Retries
+        ├── Step 2: Puter REST API Endpoint / Bridge + Timeout
+        ├── Step 3: DeepL SDK (Official API Key) + Format Mapping
+        └── Step 4: Fallback Localized Warning Response
+```
+## 2. Key Features
+Async & Non-Blocking: Runs synchronous translation libraries inside thread pool executors via asyncio.
+
+Dynamic Failover Chain: Automatically fails over across Google, Puter, and DeepL.
+
+Retry Logic with Exponential Backoff: Handles transient network blips per provider before escalating down the pipeline.
+
+Persistent TTL Caching: Retains translations for 7 days via diskcache to save redundant quota usage.
+
+Per-User Rate Limiting: Enforces cooldowns to protect the bot infrastructure against user spam.
+
+Input Sanitization: Truncates and validates input strings to fit Discord’s 2,000-character message limit.
+
+Localization (i18n): Decouples user-facing responses from error logging to support multi-language bot deployments.
+
+## 3. Environment & Dependencies
+Install required Python packages:
+
+pip install deep-translator aiogram diskcache requests aiohttp deepl
+
+## 4. Comprehensive Production Implementation
+
+import asyncio
+import logging
+import time
+from typing import Dict, Optional
+import aiohttp
+import deepl
+from diskcache import Cache
+from deep_translator import GoogleTranslator
+
+# Configure structured logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger("TranslationCopilot")
+
+# Discord safety limits
+MAX_INPUT_LENGTH = 1900
+
+# Localized user-facing messages
+RESPONSES: Dict[str, Dict[str, str]] = {
+    "lt": {
+        "rate_limited": "⏳ Prašome palaukti kelias sekundes prieš kitą vertimą.",
+        "text_too_long": f"⚠️ Tekstas per ilgas. Maksimalus leidžiamas ilgis yra {MAX_INPUT_LENGTH} simbolių.",
+        "service_unavailable": "⚠️ Atsiprašome, vertimo paslauga šiuo metu laikinai nepasiekiama."
+    },
+    "en": {
+        "rate_limited": "⏳ Please wait a few seconds before requesting another translation.",
+        "text_too_long": f"⚠️ Text is too long. Maximum allowed length is {MAX_INPUT_LENGTH} characters.",
+        "service_unavailable": "⚠️ Sorry, the translation service is currently unavailable."
+    }
+}
+
+class RateLimiter:
+    """Tracks per-user cooldowns to prevent spam and API rate-limiting."""
+    def __init__(self, cooldown_seconds: int = 3):
+        self.cooldown = cooldown_seconds
+        self._users: Dict[int, float] = {}
+
+    def is_rate_limited(self, user_id: int) -> bool:
+        now = time.time()
+        last_request = self._users.get(user_id, 0.0)
+        if now - last_request < self.cooldown:
+            return True
+        self._users[user_id] = now
+        return False
+
+class ResilientTranslator:
+    def __init__(
+        self, 
+        deepl_api_key: Optional[str] = None, 
+        puter_endpoint: str = "[https://api.puter.com/drivers/call/puter-apps/translate](https://api.puter.com/drivers/call/puter-apps/translate)"
+    ):
+        self.cache = Cache('./translation_cache')
+        self.cache_ttl = 60 * 60 * 24 * 7  # 7 days expiration
+        self.rate_limiter = RateLimiter(cooldown_seconds=3)
+        self.puter_endpoint = puter_endpoint
+        self.deepl_translator = deepl.Translator(deepl_api_key) if deepl_api_key else None
+
+    async def _execute_with_retry(self, func, retries: int = 2, delay: float = 0.5):
+        """Executes a function with exponential backoff for transient failures."""
+        for attempt in range(retries + 1):
+            try:
+                return await func()
+            except Exception as e:
+                if attempt == retries:
+                    raise e
+                await asyncio.sleep(delay * (2 ** attempt))
+
+    async def _fetch_puter_api(self, text: str, target_lang: str) -> str:
+        """HTTP REST bridge for Puter API integration with strict timeout."""
+        payload = {"text": text, "target_language": target_lang.lower()}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.puter_endpoint, 
+                json=payload, 
+                timeout=aiohttp.ClientTimeout(total=4)
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                return data.get("translated_text", "")
+
+    def normalize_lang_code(self, provider: str, lang_code: str) -> str:
+        """Normalizes language codes according to provider specifications."""
+        lang = lang_code.lower()
+        if provider == "deepl":
+            # DeepL uses uppercase format (e.g., 'EN-US', 'LT')
+            return lang.upper()
+        return lang  # Default lowercase for Google & Puter
+
+    async def translate(self, text: str, user_id: int, target_lang: str = 'lt', user_locale: str = 'lt') -> str:
+        messages = RESPONSES.get(user_locale, RESPONSES["en"])
+
+        # 1. Message Length Validation
+        if len(text) > MAX_INPUT_LENGTH:
+            return messages["text_too_long"]
+
+        # 2. Rate Limiting Check
+        if self.rate_limiter.is_rate_limited(user_id):
+            return messages["rate_limited"]
+
+        # 3. Cache Lookup
+        cache_key = f"{text}:{target_lang.lower()}"
+        cached_result = self.cache.get(cache_key)
+        if cached_result:
+            logger.info("Cache hit.")
+            return cached_result
+
+        # Step 1: Google Translator (with Retries)
+        try:
+            logger.info("Attempting Provider: GoogleTranslator")
+            target = self.normalize_lang_code("google", target_lang)
+            loop = asyncio.get_event_loop()
+            
+            result = await self._execute_with_retry(
+                lambda: loop.run_in_executor(
+                    None, 
+                    lambda: GoogleTranslator(source='auto', target=target).translate(text)
+                )
+            )
+            if result:
+                self.cache.set(cache_key, result, expire=self.cache_ttl)
+                return result
+        except Exception as e:
+            logger.warning(f"GoogleTranslator provider failed: {e}")
+
+        # Step 2: Puter API Endpoint
+        try:
+            logger.info("Attempting Provider: Puter API")
+            target = self.normalize_lang_code("puter", target_lang)
+            result = await self._execute_with_retry(
+                lambda: self._fetch_puter_api(text, target)
+            )
+            if result:
+                self.cache.set(cache_key, result, expire=self.cache_ttl)
+                return result
+        except asyncio.TimeoutError:
+            logger.warning("Puter API timed out after 4 seconds.")
+        except Exception as e:
+            logger.warning(f"Puter API provider failed: {e}")
+
+        # Step 3: DeepL Official SDK
+        if self.deepl_translator:
+            try:
+                logger.info("Attempting Provider: DeepL SDK")
+                target = self.normalize_lang_code("deepl", target_lang)
+                loop = asyncio.get_event_loop()
+                
+                result = await self._execute_with_retry(
+                    lambda: loop.run_in_executor(
+                        None, 
+                        lambda: self.deepl_translator.translate_text(text, target_lang=target)
+                    )
+                )
+                if result and result.text:
+                    self.cache.set(cache_key, result.text, expire=self.cache_ttl)
+                    return result.text
+            except Exception as e:
+                logger.error(f"DeepL API provider failed: {e}")
+
+        # Step 4: Final Exhaustion Fallback
+        logger.error(f"CRITICAL: All translation providers failed for user {user_id}.")
+        return messages["service_unavailable"]
+
+## 5. Deployment & Integration Checklist
+Puter Endpoint Verification:
+
+Ensure the puter_endpoint URL matches your hosted Puter application or worker bridge. If using Puter.js directly inside a Node microservice wrapper, pass requests to your microservice IP.
+
+Language Code Mapping:
+
+GoogleTranslator and Puter expect standard ISO codes (e.g., lt, en, es).
+
+DeepL requires uppercase codes (LT, EN-US, DE). The normalize_lang_code() helper automatically formats these.
+
+Discord Length Guards:
+
+Discord enforces a 2,000-character ceiling per message. MAX_INPUT_LENGTH is set to 1,900 to leave space for status emojis or localized warning headers.
+
+Proxy & Scale Considerations:
+
+For high-volume deployments (>10k daily translations), configure proxy rotation on deep-translator or replace diskcache with Redis for multi-worker container setups.

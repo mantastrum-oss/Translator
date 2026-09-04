@@ -1,9 +1,12 @@
 import importlib
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -47,6 +50,45 @@ class TokenLoadingTests(unittest.TestCase):
                     os.environ.pop("DISCORD_TOKEN", None)
                 else:
                     os.environ["DISCORD_TOKEN"] = original_env
+
+
+class TranslationRetryTests(unittest.TestCase):
+    def test_retries_transient_google_server_error_once(self):
+        translator = unittest.mock.Mock()
+        translator.translate.side_effect = [RuntimeError("Error 500 (Server Error)"), "Hello"]
+
+        with patch("bot.GoogleTranslator", return_value=translator), patch("bot.time.sleep") as mock_sleep:
+            result = bot.translate_text("Hola", "en")
+
+        self.assertEqual(result, "Hello")
+        self.assertEqual(translator.translate.call_count, 2)
+        mock_sleep.assert_called_once_with(bot.GOOGLE_TRANSLATION_RETRY_DELAY_SECONDS)
+
+    def test_uses_mymemory_after_google_server_error(self):
+        translator = unittest.mock.Mock()
+        translator.translate.return_value = "Error 500 (Server Error)"
+        response = unittest.mock.Mock()
+        response.read.return_value = json.dumps({
+            "responseStatus": 200,
+            "responseData": {"translatedText": "Hola"},
+        }).encode("utf-8")
+        response.__enter__ = unittest.mock.Mock(return_value=response)
+        response.__exit__ = unittest.mock.Mock(return_value=False)
+
+        with patch("bot.GoogleTranslator", return_value=translator), patch("bot.time.sleep"), patch(
+            "bot.urllib.request.urlopen", return_value=response
+        ) as mock_urlopen:
+            result = bot.translate_text("Hello", "es")
+
+        self.assertEqual(result, "Hola")
+        self.assertEqual(translator.translate.call_count, 2)
+        mock_urlopen.assert_called_once()
+
+    def test_mymemory_detects_explicit_source_language(self):
+        with patch("bot.detect", return_value="en"):
+            source_language = bot.get_mymemory_source_language("Hello", "auto")
+
+        self.assertEqual(source_language, "en")
 
 
 if __name__ == "__main__":

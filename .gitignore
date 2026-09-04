@@ -3,3 +3,5 @@ __pycache__/
 .env
 .vscode/
 bot_data.json
+translation_cache/
+translator.zip

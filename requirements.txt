@@ -1,2 +1,14 @@
-discord.py==2.7.1
-deep-translator==1.11.4
+# Discord Bot Framework
+discord.py>=2.3.0
+
+# Translation Providers & Utilities
+deep-translator>=1.11.4
+deepl>=1.16.0
+aiohttp>=3.9.0
+langdetect>=1.0.9
+
+# Caching & Storage
+diskcache>=5.6.0
+
+# Environment & Config Management (Recommended)
+python-dotenv>=1.0.0

@@ -1,6 +1,6 @@
 # Translator Discord Bot
 
-A Discord bot that adds translation actions to messages and returns user-specific translations.
+A translator that adds translation actions to messages and returns user-specific translations.
 
 ## Features
 
@@ -9,7 +9,7 @@ A Discord bot that adds translation actions to messages and returns user-specifi
 - Uses each user's saved target language preference
 - If a user has no saved language, shows a language dropdown selector
 - Supports per-server and per-channel translate button toggles
-- Localizes key UI messages based on Discord locale
+- Automatically displays UI messages in the user's native Discord language.
 
 ## Translation target languages
 
@@ -48,9 +48,22 @@ The language selector supports 25 target languages (Discord select menu max):
 - `/translate_button_channel` - enable or disable auto translate buttons for a specific channel (admin)
 - Message context menu `Translate` - translate the selected message
 
+## Slash Command Sync Scope
+
+This bot syncs commands globally by default so Discord can list them on the bot profile and App Directory page.
+
+Notes:
+
+- Global sync can take time to propagate (often up to 1 hour, sometimes longer in profile UI).
+
 ## Changelog
 
 User-facing updates since version 1.0.
+
+### v2.0.2 - 2026-08-07
+
+- Made the app available in Direct Messages (DM), including message context menu translation.
+- Added and expanded localized UI text across supported Discord locales.
 
 ### v2.0.1 - 2026-07-27
 
