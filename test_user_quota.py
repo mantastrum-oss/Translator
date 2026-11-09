@@ -16,6 +16,7 @@ from user_quota import (
     _get_month_key,
     _query_user_quota_sync,
     _update_user_quota_sync,
+    _add_user_quota_bonus_sync,
     _quota_cache,
     _quota_cache_timestamp,
 )
@@ -186,6 +187,37 @@ class TestQuotaUpdates:
                 success = _update_user_quota_sync(user_id="123", month="2026-08", char_count=1000)
                 # Should return False when network error occurs
                 assert success is False
+
+    def test_quota_bonus_increases_limit_without_changing_usage(self, clear_quota_cache):
+        """A bonus changes only monthly_limit and invalidates cached quota."""
+        _quota_cache["123"] = {"monthly_limit": 50000, "used_chars": 1200}
+        _quota_cache_timestamp["123"] = datetime.now(timezone.utc).timestamp()
+
+        with patch('user_quota._query_user_quota_sync') as mock_query, \
+             patch('urllib.request.urlopen') as mock_urlopen, \
+             patch('user_quota.SUPABASE_URL', 'https://example.supabase.co'), \
+             patch('user_quota.SUPABASE_SERVICE_ROLE_KEY', 'key123'):
+            mock_query.return_value = {"monthly_limit": 50000, "used_chars": 1200}
+            mock_response = MagicMock()
+            mock_response.read.return_value = b'{}'
+            mock_urlopen.return_value.__enter__.return_value = mock_response
+
+            success = _add_user_quota_bonus_sync("123", "2026-08", 100000)
+
+            assert success is True
+            request = mock_urlopen.call_args[0][0]
+            payload = json.loads(request.data.decode("utf-8"))
+            assert payload["monthly_limit"] == 150000
+            assert payload["used_chars"] == 1200
+            assert "123" not in _quota_cache
+            assert "123" not in _quota_cache_timestamp
+
+    def test_quota_bonus_rejects_failed_lookup(self, clear_quota_cache):
+        """A failed lookup must not grant a bonus."""
+        with patch('user_quota._query_user_quota_sync', return_value=None), \
+             patch('user_quota.SUPABASE_URL', 'https://example.supabase.co'), \
+             patch('user_quota.SUPABASE_SERVICE_ROLE_KEY', 'key123'):
+            assert _add_user_quota_bonus_sync("123", "2026-08", 100000) is False
 
 
 class TestQuotaReset:

@@ -20,6 +20,9 @@ logger = logging.getLogger("UserQuota")
 # Supabase configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+DEFAULT_USER_MONTHLY_CHARACTER_LIMIT = int(
+    os.getenv("USER_MONTHLY_CHARACTER_LIMIT", "50000")
+)
 
 # Quota enforcement timeouts
 USER_QUOTA_TIMEOUT_SECONDS = 1.5
@@ -29,6 +32,13 @@ USER_QUOTA_CACHE_TTL_SECONDS = 30
 # In-memory quota cache (expires after 30 seconds)
 _quota_cache: Dict[str, Dict] = {}
 _quota_cache_timestamp: Dict[str, float] = {}
+
+
+def invalidate_user_quota_cache(user_id: int | str) -> None:
+    """Invalidate cached quota data after an external limit change."""
+    user_id_str = str(user_id)
+    _quota_cache.pop(user_id_str, None)
+    _quota_cache_timestamp.pop(user_id_str, None)
 
 
 def _get_month_key() -> str:
@@ -83,13 +93,19 @@ def _query_user_quota_sync(user_id: str, month: str) -> Optional[Dict]:
             if isinstance(data, list) and len(data) > 0:
                 return data[0]  # Return first (and only) row
             
-            # Row doesn't exist yet; treat as no quota configured (allow unlimited)
-            return {"monthly_limit": 0, "used_chars": 0}
+            # New users receive the default free-tier quota.
+            return {
+                "monthly_limit": DEFAULT_USER_MONTHLY_CHARACTER_LIMIT,
+                "used_chars": 0,
+            }
     
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            # Row not found; allow unlimited
-            return {"monthly_limit": 0, "used_chars": 0}
+            # New users receive the default free-tier quota.
+            return {
+                "monthly_limit": DEFAULT_USER_MONTHLY_CHARACTER_LIMIT,
+                "used_chars": 0,
+            }
         logger.error(f"Supabase quota query failed (HTTP {e.code}): {e}")
         return None  # Fail closed
     
@@ -130,7 +146,9 @@ def _update_user_quota_sync(user_id: str, month: str, char_count: int) -> bool:
         payload = {
             "user_id": user_id,
             "month": month,
-            "monthly_limit": quota.get("monthly_limit", 0),
+            "monthly_limit": quota.get(
+                "monthly_limit", DEFAULT_USER_MONTHLY_CHARACTER_LIMIT
+            ),
             "used_chars": new_used,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -156,6 +174,60 @@ def _update_user_quota_sync(user_id: str, month: str, char_count: int) -> bool:
     
     except Exception as e:
         logger.error(f"Failed to update quota for user {user_id}: {e}")
+        return False
+
+
+def _add_user_quota_bonus_sync(user_id: str, month: str, char_bonus: int) -> bool:
+    """Increase only the current month's limit for a user.
+
+    This operation is intended for verified external grants such as payments.
+    It preserves ``used_chars`` and invalidates the local quota cache after a
+    successful upsert.
+    """
+    if char_bonus <= 0:
+        logger.warning("Ignoring non-positive quota bonus for user %s", user_id)
+        return False
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        logger.warning("Supabase not configured; quota bonus skipped")
+        return False
+
+    try:
+        quota = _query_user_quota_sync(user_id, month)
+        if quota is None:
+            logger.error("Skipping quota bonus for user %s due to lookup failure", user_id)
+            return False
+
+        current_limit = int(quota.get("monthly_limit", DEFAULT_USER_MONTHLY_CHARACTER_LIMIT))
+        current_used = int(quota.get("used_chars", 0))
+        payload = {
+            "user_id": user_id,
+            "month": month,
+            "monthly_limit": current_limit + char_bonus,
+            "used_chars": current_used,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        url = f"{SUPABASE_URL}/rest/v1/user_monthly_usage?on_conflict=user_id,month"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(request, timeout=USER_QUOTA_TIMEOUT_SECONDS) as response:
+            response.read()
+
+        _quota_cache.pop(user_id, None)
+        _quota_cache_timestamp.pop(user_id, None)
+        logger.info("Added %s quota characters for user %s", char_bonus, user_id)
+        return True
+
+    except (TypeError, ValueError) as exc:
+        logger.error("Invalid quota data for user %s: %s", user_id, exc)
+        return False
+    except Exception as exc:
+        logger.error("Failed to add quota bonus for user %s: %s", user_id, exc)
         return False
 
 
@@ -269,6 +341,21 @@ async def update_user_quota_async(user_id: int, char_count: int) -> bool:
         user_id_str,
         month,
         char_count
+    )
+
+
+async def add_user_quota_bonus_async(user_id: int, char_bonus: int) -> bool:
+    """Add verified bonus characters to the user's current monthly limit."""
+    user_id_str = str(user_id)
+    month = _get_month_key()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        _add_user_quota_bonus_sync,
+        user_id_str,
+        month,
+        char_bonus,
     )
 
 

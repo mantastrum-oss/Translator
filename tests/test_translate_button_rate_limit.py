@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -108,6 +109,13 @@ class TranslateButtonRateLimitTests(unittest.TestCase):
         self.assertIn("7", message)
         self.assertEqual(message, "Du bist etwas zu schnell. Versuch es in 7 Sek. erneut.")
 
+    def test_every_supported_locale_has_a_translating_button_label(self):
+        self.assertTrue(bot.LOCALE_STRINGS)
+        for locale, strings in bot.LOCALE_STRINGS.items():
+            with self.subTest(locale=locale):
+                self.assertIn("translating_now", strings)
+                self.assertTrue(strings["translating_now"])
+
 
 class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -117,7 +125,6 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_translation_cooldown_blocks_immediate_retry(self):
         """After successful translation, user must wait 3+ seconds before next translation."""
         user_id = 5005
-        bot.user_languages[user_id] = "en"
 
         class FakeResponse:
             def __init__(self):
@@ -154,10 +161,12 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
         view = bot.TranslateButtonView()
         button_item = next(child for child in view.children if getattr(child, "custom_id", "") == "translate_button")
 
-        with patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
+        with patch.dict(bot.user_languages, {user_id: "en"}), \
+             patch("bot.is_translation_blocked", new_callable=AsyncMock, return_value=False), \
+             patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
              patch("bot.send_response", new_callable=AsyncMock) as mock_send_response, \
-               patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
-               patch("bot.emit_translation_analytics_event") as analytics:
+             patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
+             patch("bot.emit_translation_analytics_event") as analytics:
             
             # First translation allowed
             await bot.TranslateButtonView.translate_button(view, make_button_interaction(1), button_item)
@@ -185,6 +194,63 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
                 "success": False,
                 "error_code": "rate_limited",
             })
+
+    async def test_translation_button_is_static_and_disabled_while_translating(self):
+        class FakeResponse:
+            def is_done(self):
+                return False
+
+            async def defer(self, *args, **kwargs):
+                return None
+
+        class FakeFollowup:
+            async def send(self, *args, **kwargs):
+                return None
+
+        class FakeChannel:
+            async def fetch_message(self, message_id):
+                return SimpleNamespace(content="Hello world")
+
+        edits = []
+
+        class FakeMessage:
+            id = 987654
+            reference = SimpleNamespace(message_id=123)
+
+            async def edit(self, *, view):
+                button = next(
+                    child for child in view.children
+                    if getattr(child, "custom_id", "") == "translate_button"
+                )
+                edits.append((button.label, button.disabled))
+
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=424242),
+            locale="en-US",
+            id=1,
+            guild=None,
+            response=FakeResponse(),
+            followup=FakeFollowup(),
+            channel=FakeChannel(),
+            message=FakeMessage(),
+        )
+        view = bot.TranslateButtonView()
+        button_item = next(
+            child for child in view.children
+            if getattr(child, "custom_id", "") == "translate_button"
+        )
+
+        with patch.dict(bot.user_languages, {424242: "en"}), \
+             patch("bot.is_translation_blocked", new_callable=AsyncMock, return_value=False), \
+             patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
+             patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
+             patch("bot.emit_translation_analytics_event"):
+            await bot.TranslateButtonView.translate_button(view, interaction, button_item)
+
+        self.assertEqual(len(edits), 2)
+        self.assertTrue(edits[0][1])
+        self.assertTrue(edits[0][0].endswith("..."))
+        self.assertFalse(edits[1][1])
 
 
 if __name__ == "__main__":

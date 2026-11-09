@@ -4,15 +4,17 @@ import re
 import ssl
 import time
 import asyncio
+import logging
 import urllib.error
 import urllib.request
 import traceback
+from contextlib import suppress
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
-from deep_translator import GoogleTranslator
 from langdetect import DetectorFactory, LangDetectException, detect
+from google_translation import translate_with_google
 
 
 def load_environment_from_dotenv() -> None:
@@ -36,6 +38,10 @@ def load_environment_from_dotenv() -> None:
 
 
 load_environment_from_dotenv()
+
+from console_log import log, setup_logging
+
+setup_logging()
 
 from translation_service import ResilientTranslator
 from user_quota import check_user_quota, update_user_quota_async
@@ -94,16 +100,11 @@ def configure_tls_certificates() -> None:
         except Exception:
             continue
 
-    print(f"[{get_timestamp()}] [TLS] no usable CA bundle path found; using Python defaults")
+    log("TLS", f"no usable CA bundle path found; using Python defaults")
 
 
 configure_tls_certificates()
 
-
-def get_timestamp() -> str:
-    """Return current time in HH:MM:SS format using GMT+3."""
-    gmt_plus_3 = timezone(timedelta(hours=3))
-    return datetime.now(gmt_plus_3).strftime("%H:%M:%S")
 
 # Initialize Discord Bot with required intents
 intents = discord.Intents.default()
@@ -125,9 +126,9 @@ class TranslatorBot(discord.Client):
         try:
             await self.tree.set_translator(BotCommandTranslator())
             synced_commands = await self.tree.sync()
-            print(f"[{get_timestamp()}] [Commands] synced {len(synced_commands)} global command(s)")
+            log("Commands", f"synced {len(synced_commands)} global command(s)")
         except Exception as sync_error:
-            print(f"[{get_timestamp()}] [Commands] sync failed: {sync_error}")
+            log("Commands", f"sync failed: {sync_error}")
 
     async def close(self):
         await publish_bot_heartbeat("shutting_down")
@@ -139,8 +140,19 @@ client = TranslatorBot()
 
 # Initialize the resilient translation service
 # The DeepL API key can be set via DEEPL_API_KEY environment variable
+# The self-hosted Madlad CTranslate2 instance is used first via CTRANSLATE_URL.
 deepl_api_key = os.getenv("DEEPL_API_KEY")
-resilient_translator = ResilientTranslator(deepl_api_key=deepl_api_key)
+ctranslate_url = os.getenv("CTRANSLATE_URL", "https://llm.vertejukas.sbs")
+ctranslate_api_key = os.getenv("CTRANSLATE_API_KEY")
+google_translate_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY")
+ctranslate_timeout_seconds = float(os.getenv("CTRANSLATE_TIMEOUT_SECONDS", "30"))
+resilient_translator = ResilientTranslator(
+    deepl_api_key=deepl_api_key,
+    ctranslate_url=ctranslate_url,
+    ctranslate_api_key=ctranslate_api_key,
+    google_translate_api_key=google_translate_api_key,
+    ctranslate_timeout_seconds=ctranslate_timeout_seconds,
+)
 
 # Persistence for user language preferences and bot settings.
 STATE_FILE = Path(__file__).with_name("bot_data.json")
@@ -170,7 +182,7 @@ def get_local_config_value(name: str, default: str = "") -> str:
                 value = value[1:-1]
             return value.strip()
     except Exception as exc:
-        print(f"[{get_timestamp()}] [Storage] failed to read .env: {exc}")
+        log("Storage", f"failed to read .env: {exc}")
 
     return default
 
@@ -258,14 +270,14 @@ def load_json_state() -> dict:
                     state["settings"] = DEFAULT_SETTINGS.copy()
                 return state
     except Exception as e:
-        print(f"[{get_timestamp()}] [Storage] failed to load bot state: {e}")
+        log("Storage", f"failed to load bot state: {e}")
 
     try:
         if LEGACY_USER_LANG_FILE.exists():
             raw = json.loads(LEGACY_USER_LANG_FILE.read_text(encoding="utf-8"))
             state["user_languages"] = {int(k): v for k, v in raw.items()}
     except Exception as e:
-        print(f"[{get_timestamp()}] [Storage] failed to load legacy user languages: {e}")
+        log("Storage", f"failed to load legacy user languages: {e}")
 
     try:
         if LEGACY_SETTINGS_FILE.exists():
@@ -273,7 +285,7 @@ def load_json_state() -> dict:
             if isinstance(raw, dict):
                 state["settings"] = {**DEFAULT_SETTINGS, **raw}
     except Exception as e:
-        print(f"[{get_timestamp()}] [Storage] failed to load legacy settings: {e}")
+        log("Storage", f"failed to load legacy settings: {e}")
 
     save_json_state(state)
 
@@ -283,7 +295,7 @@ def load_json_state() -> dict:
         if LEGACY_SETTINGS_FILE.exists():
             LEGACY_SETTINGS_FILE.unlink(missing_ok=True)
     except Exception as e:
-        print(f"[{get_timestamp()}] [Storage] failed to delete legacy files: {e}")
+        log("Storage", f"failed to delete legacy files: {e}")
 
     return state
 
@@ -293,8 +305,8 @@ def load_state() -> dict:
         try:
             return load_supabase_state()
         except Exception as e:
-            print(f"[{get_timestamp()}] [Storage] failed to load Supabase state: {e}")
-            print(f"[{get_timestamp()}] [Storage] falling back to bot_data.json")
+            log("Storage", f"failed to load Supabase state: {e}")
+            log("Storage", f"falling back to bot_data.json")
 
     return load_json_state()
 
@@ -309,7 +321,7 @@ def save_json_state(state: dict) -> None:
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(STATE_FILE)
     except Exception as e:
-        print(f"[{get_timestamp()}] [Storage] failed to save bot state: {e}")
+        log("Storage", f"failed to save bot state: {e}")
 
 
 def load_user_languages() -> dict:
@@ -390,7 +402,7 @@ async def emit_bot_log(**kwargs) -> None:
     try:
         await asyncio.to_thread(write_bot_log, **kwargs)
     except Exception as exc:
-        print(f"[{get_timestamp()}] [Logs] delivery failed: {type(exc).__name__}")
+        log("Logs", f"delivery failed: {type(exc).__name__}")
 
 
 async def is_translation_blocked(
@@ -401,7 +413,7 @@ async def is_translation_blocked(
 ) -> bool:
     user_id_text = str(user_id)
     if not (STORAGE_BACKEND == "supabase" and SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
-        print(f"[{get_timestamp()}] [Blocks] user_id={user_id_text} match=error category=configuration")
+        log("Blocks", f"user_id={user_id_text} match=error category=configuration")
         return True
 
     try:
@@ -414,7 +426,7 @@ async def is_translation_blocked(
             timeout=1.5,
         )
         if blocked:
-            print(f"[{get_timestamp()}] [Blocks] user_id={user_id_text} match=true category=blocked")
+            log("Blocks", f"user_id={user_id_text} match=true category=blocked")
             asyncio.create_task(emit_bot_log(
                 level="info",
                 event_type="translation_blocked",
@@ -424,7 +436,7 @@ async def is_translation_blocked(
             ))
         return blocked
     except Exception as exc:
-        print(f"[{get_timestamp()}] [Blocks] user_id={user_id_text} match=error category={normalize_analytics_error_code(exc)}")
+        log("Blocks", f"user_id={user_id_text} match=error category={normalize_analytics_error_code(exc)}")
         asyncio.create_task(emit_bot_log(
             level="error",
             event_type="block_check_failed",
@@ -545,7 +557,7 @@ async def initialize_storage() -> None:
         state = load_json_state()
         user_languages = state["user_languages"]
         settings = state["settings"]
-        print(f"[{get_timestamp()}] [Storage] initialized using JSON")
+        log("Storage", f"initialized using JSON")
         return
 
     try:
@@ -558,17 +570,17 @@ async def initialize_storage() -> None:
         if STORAGE_IMPORT_JSON and not has_database_state and STATE_FILE.exists():
             state = load_json_state()
             await asyncio.to_thread(import_state_to_supabase, state)
-            print(f"[{get_timestamp()}] [Storage] imported bot_data.json into Supabase")
+            log("Storage", f"imported bot_data.json into Supabase")
 
         user_languages = state["user_languages"]
         settings = state["settings"]
-        print(f"[{get_timestamp()}] [Storage] initialized using Supabase")
+        log("Storage", f"initialized using Supabase")
     except Exception as exc:
-        print(f"[{get_timestamp()}] [Storage] Supabase initialization failed: {exc}")
+        log("Storage", f"Supabase initialization failed: {exc}")
         state = load_json_state()
         user_languages = state["user_languages"]
         settings = state["settings"]
-        print(f"[{get_timestamp()}] [Storage] initialized using JSON fallback")
+        log("Storage", f"initialized using JSON fallback")
 
 
 async def persist_user_language(user_id: int, language_code: str) -> None:
@@ -577,7 +589,7 @@ async def persist_user_language(user_id: int, language_code: str) -> None:
             await asyncio.to_thread(save_user_language_to_supabase, user_id, language_code)
             return
         except Exception as exc:
-            print(f"[{get_timestamp()}] [Storage] language save failed: {exc}")
+            log("Storage", f"language save failed: {exc}")
 
     save_json_state({"user_languages": user_languages, "settings": settings})
 
@@ -588,7 +600,7 @@ async def persist_guild_setting(guild_id: int, enabled: bool) -> None:
             await asyncio.to_thread(save_guild_setting_to_supabase, guild_id, enabled)
             return
         except Exception as exc:
-            print(f"[{get_timestamp()}] [Storage] guild setting save failed: {exc}")
+            log("Storage", f"guild setting save failed: {exc}")
 
     save_json_state({"user_languages": user_languages, "settings": settings})
 
@@ -599,7 +611,7 @@ async def persist_channel_setting(channel_id: int, enabled: bool) -> None:
             await asyncio.to_thread(save_channel_setting_to_supabase, channel_id, enabled)
             return
         except Exception as exc:
-            print(f"[{get_timestamp()}] [Storage] channel setting save failed: {exc}")
+            log("Storage", f"channel setting save failed: {exc}")
 
     save_json_state({"user_languages": user_languages, "settings": settings})
 
@@ -686,6 +698,7 @@ GOOGLE_TRANSLATION_RETRY_ATTEMPTS = 2
 GOOGLE_TRANSLATION_RETRY_DELAY_SECONDS = 0.5
 MYMEMORY_TRANSLATION_URL = "https://api.mymemory.translated.net/get"
 MYMEMORY_TRANSLATION_TIMEOUT_SECONDS = 10
+CTRANSLATE_TIMEOUT_SECONDS = float(os.getenv("CTRANSLATE_TIMEOUT_SECONDS", "30"))
 
 
 def is_transient_translation_error(exc: Exception) -> bool:
@@ -743,6 +756,33 @@ def translate_with_mymemory(text: str, source_lang: str, target_lang: str) -> st
     return translated
 
 
+def translate_with_ctranslate(text: str, source_lang: str, target_lang: str) -> str:
+    """Translate through the self-hosted CTranslate2/NLLB instance (ISO codes in, no character limit)."""
+    if not ctranslate_url:
+        raise RuntimeError("CTranslate2 URL is not configured")
+
+    payload = {"q": text, "source": source_lang, "target": target_lang, "format": "text"}
+    if ctranslate_api_key:
+        payload["api_key"] = ctranslate_api_key
+
+    request = urllib.request.Request(
+        f"{ctranslate_url}/translate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "DiscordTranslatorBot/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=CTRANSLATE_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as http_error:
+        error_body = json.loads(http_error.read().decode("utf-8"))
+        raise RuntimeError(error_body.get("error", f"CTranslate2 HTTP {http_error.code}")) from http_error
+
+    translated = data.get("translatedText")
+    if not translated:
+        raise RuntimeError("CTranslate2 did not return translated text")
+    return translated
+
+
 def translate_text(text: str, target_lang: str) -> str:
     target_lang = normalize_language_code(target_lang)
     text = normalize_discord_emoji_markdown(text)
@@ -755,12 +795,22 @@ def translate_text(text: str, target_lang: str) -> str:
 
     # Extract emojis before translation (helps with Japanese and mixed-content text)
     text_without_emojis, emojis = extract_emojis_and_preserve_text(text)
-    
+
+    if ctranslate_url:
+        try:
+            translated = translate_with_ctranslate(text_without_emojis, source_lang, target_lang)
+            return restore_emojis(translated, emojis)
+        except Exception as exc:
+            log("Translate", f"CTranslate2 unavailable; falling back to Google: {exc}")
+
     for attempt in range(GOOGLE_TRANSLATION_RETRY_ATTEMPTS):
         try:
-            translated = GoogleTranslator(source=source_lang, target=target_lang).translate(text_without_emojis)
-            if is_google_error_response(translated):
-                raise RuntimeError(translated)
+            translated = translate_with_google(
+                text_without_emojis,
+                source_lang,
+                target_lang,
+                google_translate_api_key,
+            )
             # Restore emojis after translation
             return restore_emojis(translated, emojis)
         except Exception as exc:
@@ -779,10 +829,10 @@ def translate_text(text: str, target_lang: str) -> str:
             if not is_transient_translation_error(exc):
                 raise
             if attempt + 1 == GOOGLE_TRANSLATION_RETRY_ATTEMPTS:
-                print(f"[{get_timestamp()}] [Translate] Google unavailable; using MyMemory fallback")
+                log("Translate", f"Google unavailable; using MyMemory fallback")
                 translated = translate_with_mymemory(text_without_emojis, source_lang, target_lang)
                 return restore_emojis(translated, emojis)
-            print(f"[{get_timestamp()}] [Translate] upstream 5xx; retrying once")
+            log("Translate", f"upstream 5xx; retrying once")
             time.sleep(GOOGLE_TRANSLATION_RETRY_DELAY_SECONDS)
 
 
@@ -791,7 +841,7 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
     Async translation using the resilient multi-provider fallback service.
     
     This function provides the same translation capability as translate_text()
-    but with added resilience through fallback providers (Google → Puter → DeepL)
+    but with added resilience through fallback providers (Google → DeepL)
     and persistent caching.
     
     Flow:
@@ -823,7 +873,7 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
     
     if not quota_allowed:
         # User is over quota or lookup failed; reject without translation
-        print(f"[{get_timestamp()}] [Quota] user {user_id} denied: {quota_error}")
+        log("Quota", f"user {user_id} denied: {quota_error}")
         return quota_error
     
     # STEP 2: Use resilient translator (quota is confirmed available)
@@ -843,14 +893,14 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
             update_success = await update_user_quota_async(user_id, char_count)
             if not update_success:
                 # Quota update failed; log but don't block the translation
-                print(f"[{get_timestamp()}] [Quota] failed to update quota for user {user_id}")
+                log("Quota", f"failed to update quota for user {user_id}")
         
         # Restore emojis after translation
         return restore_emojis(translated, emojis)
     
     except Exception as exc:
         logger_msg = f"Translation error: {exc}"
-        print(f"[{get_timestamp()}] [Translate] {logger_msg}")
+        log("Translate", f"{logger_msg}")
         # Return a generic error message (don't update quota for failed translations)
         return "⚠️ Translation service temporarily unavailable."
 
@@ -874,17 +924,13 @@ TRANSLATE_LARGE_MESSAGE_COOLDOWN_MULTIPLIER = 0.01  # 1 sec per 100 chars
 
 translate_button_taps_by_user: dict[int, list[float]] = {}
 translate_last_success_by_user: dict[int, float] = {}  # Track post-translation cooldown
+translation_button_in_progress: set[int] = set()
 
 ANALYTICS_COLLECTOR_URL = get_local_config_value("ANALYTICS_COLLECTOR_URL").rstrip("/")
 ANALYTICS_API_KEY = get_local_config_value("ANALYTICS_API_KEY")
 ANALYTICS_TIMEOUT_SECONDS = float(get_local_config_value("ANALYTICS_TIMEOUT_SECONDS", "0.8"))
 ANALYTICS_MAX_QUEUE_SIZE = int(get_local_config_value("ANALYTICS_MAX_QUEUE_SIZE", "1000"))
 ANALYTICS_RETRY_LIMIT = int(get_local_config_value("ANALYTICS_RETRY_LIMIT", "2"))
-MONTHLY_CHARACTER_LIMIT = int(get_local_config_value("MONTHLY_CHARACTER_LIMIT", "15000"))
-MONTHLY_WARNING_80_PERCENT = 0.80
-MONTHLY_WARNING_90_PERCENT = 0.90
-QUOTA_TIMEOUT_SECONDS = 1.5
-QUOTA_RETRY_LIMIT = 1
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 HEARTBEAT_TIMEOUT_SECONDS = 0.8
 HEARTBEAT_RETRY_LIMIT = 2
@@ -898,67 +944,6 @@ heartbeat_status = "starting"
 
 def analytics_is_enabled() -> bool:
     return bool(ANALYTICS_COLLECTOR_URL and ANALYTICS_API_KEY)
-
-
-def get_month_start_utc() -> str:
-    now = datetime.now(timezone.utc)
-    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).date().isoformat()
-
-
-def reserve_monthly_characters_sync(guild_id: int, char_count: int) -> dict:
-    rows = supabase_request(
-        "POST",
-        "rpc/reserve_translation_characters",
-        {
-            "p_guild_id": str(guild_id),
-            "p_month_start": get_month_start_utc(),
-            "p_char_count": max(0, int(char_count)),
-            "p_monthly_limit": MONTHLY_CHARACTER_LIMIT,
-        },
-    )
-    if not rows:
-        raise RuntimeError("quota RPC returned no result")
-    return rows[0] if isinstance(rows, list) else rows
-
-
-async def reserve_monthly_characters(
-    guild_id: int | None,
-    char_count: int,
-) -> tuple[bool, str | None]:
-    if guild_id is None or MONTHLY_CHARACTER_LIMIT <= 0:
-        return True, None
-
-    for attempt in range(QUOTA_RETRY_LIMIT + 1):
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(reserve_monthly_characters_sync, guild_id, char_count),
-                timeout=QUOTA_TIMEOUT_SECONDS,
-            )
-            if not bool(result.get("allowed")):
-                return False, "limit"
-            usage = int(result.get("used_characters", 0))
-            limit = int(result.get("monthly_limit", MONTHLY_CHARACTER_LIMIT))
-            ratio = usage / limit if limit > 0 else 0
-            if ratio >= MONTHLY_WARNING_90_PERCENT:
-                return True, "90"
-            if ratio >= MONTHLY_WARNING_80_PERCENT:
-                return True, "80"
-            return True, None
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if attempt >= QUOTA_RETRY_LIMIT:
-                category = normalize_analytics_error_code(exc)
-                print(f"[{get_timestamp()}] [Quota] reservation failed category={category}: {exc}")
-                asyncio.create_task(emit_bot_log(
-                    level="error",
-                    event_type="quota_check_failed",
-                    error_code=category,
-                    guild_id=guild_id,
-                ))
-                return False, "error"
-            await asyncio.sleep(0.25 * (attempt + 1))
-    return False, "error"
 
 
 def get_monthly_limit_message(warning: str | None) -> str | None:
@@ -980,16 +965,10 @@ def format_quota_error_message(quota_warning: str | None) -> str | None:
 
 
 async def check_translation_quota(user_id: int | None, guild_id: int | None, char_count: int) -> tuple[bool, str | None]:
-    if user_id is not None:
-        user_allowed, user_warning = check_user_quota(user_id, char_count)
-        if not user_allowed:
-            return False, user_warning
-
-    guild_allowed, guild_warning = await reserve_monthly_characters(guild_id, char_count)
-    if not guild_allowed:
-        return False, guild_warning
-
-    return True, None
+    """Enforce the per-user monthly quota. There is no guild-level cap."""
+    if user_id is None:
+        return True, None
+    return check_user_quota(user_id, char_count)
 
 
 def build_bot_heartbeat_payload(status: str, guild_count: int) -> dict:
@@ -1046,8 +1025,9 @@ async def publish_bot_heartbeat(status: str) -> bool:
             raise
         except Exception as exc:
             if attempt >= HEARTBEAT_RETRY_LIMIT:
-                print(
-                    f"[{get_timestamp()}] [Heartbeat] delivery failed "
+                log(
+                    "Heartbeat",
+                    f"delivery failed "
                     f"status={status} category={heartbeat_error_category(exc)}"
                 )
                 return False
@@ -1064,11 +1044,11 @@ async def _heartbeat_worker() -> None:
 def start_heartbeat_worker() -> None:
     global heartbeat_worker_task
     if not analytics_is_enabled():
-        print(f"[{get_timestamp()}] [Heartbeat] disabled (missing analytics configuration)")
+        log("Heartbeat", f"disabled (missing analytics configuration)")
         return
     if heartbeat_worker_task is None or heartbeat_worker_task.done():
         heartbeat_worker_task = asyncio.create_task(_heartbeat_worker(), name="bot-heartbeat")
-        print(f"[{get_timestamp()}] [Heartbeat] worker started")
+        log("Heartbeat", f"worker started")
 
 
 async def shutdown_heartbeat_worker() -> None:
@@ -1175,8 +1155,9 @@ async def _analytics_worker() -> None:
                 except Exception as exc:
                     attempt += 1
                     if attempt > ANALYTICS_RETRY_LIMIT:
-                        print(
-                            f"[{get_timestamp()}] [Analytics] drop event after retries "
+                        log(
+                            "Analytics",
+                            f"drop event after retries "
                             f"error={normalize_analytics_error_code(exc)}"
                         )
                         break
@@ -1191,7 +1172,7 @@ def start_analytics_worker_if_configured() -> None:
     global analytics_event_queue, analytics_worker_task
 
     if not analytics_is_enabled():
-        print(f"[{get_timestamp()}] [Analytics] disabled (missing ANALYTICS_COLLECTOR_URL or ANALYTICS_API_KEY)")
+        log("Analytics", f"disabled (missing ANALYTICS_COLLECTOR_URL or ANALYTICS_API_KEY)")
         return
 
     if analytics_event_queue is None:
@@ -1199,7 +1180,7 @@ def start_analytics_worker_if_configured() -> None:
 
     if analytics_worker_task is None or analytics_worker_task.done():
         analytics_worker_task = asyncio.create_task(_analytics_worker(), name="analytics-worker")
-        print(f"[{get_timestamp()}] [Analytics] worker started")
+        log("Analytics", f"worker started")
 
 
 async def shutdown_analytics_worker() -> None:
@@ -1249,9 +1230,9 @@ def emit_translation_analytics_event(
             analytics_event_queue.get_nowait()
             analytics_event_queue.task_done()
             analytics_event_queue.put_nowait(payload)
-            print(f"[{get_timestamp()}] [Analytics] queue full; dropped oldest event")
+            log("Analytics", f"queue full; dropped oldest event")
         except Exception:
-            print(f"[{get_timestamp()}] [Analytics] queue full; dropped new event")
+            log("Analytics", f"queue full; dropped new event")
 
 
 def check_translate_button_rate_limit(user_id: int, message_length: int = 0, now_seconds: float | None = None) -> tuple[bool, int]:
@@ -1378,10 +1359,10 @@ async def send_response(interaction: discord.Interaction, **kwargs):
         return await interaction.followup.send(**kwargs)
     except Exception as exc:
         if isinstance(exc, discord.errors.NotFound):
-            print(f"[{get_timestamp()}] [Button] interaction expired or was already handled: {exc}")
+            log("Button", f"interaction expired or was already handled: {exc}")
             return None
         if isinstance(exc, discord.errors.HTTPException) and exc.status == 400 and exc.code == 40060:
-            print(f"[{get_timestamp()}] [Button] interaction already acknowledged: {exc}")
+            log("Button", f"interaction already acknowledged: {exc}")
             return None
         traceback.print_exc()
         try:
@@ -1390,10 +1371,10 @@ async def send_response(interaction: discord.Interaction, **kwargs):
             return await interaction.followup.send(**kwargs)
         except Exception as retry_exc:
             if isinstance(retry_exc, discord.errors.NotFound):
-                print(f"[{get_timestamp()}] [Button] interaction expired during retry: {retry_exc}")
+                log("Button", f"interaction expired during retry: {retry_exc}")
                 return None
             if isinstance(retry_exc, discord.errors.HTTPException) and retry_exc.status == 400 and retry_exc.code == 40060:
-                print(f"[{get_timestamp()}] [Button] interaction already acknowledged during retry: {retry_exc}")
+                log("Button", f"interaction already acknowledged during retry: {retry_exc}")
                 return None
             traceback.print_exc()
             return None
@@ -1700,6 +1681,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Seleziona prima una lingua.",
         "original_message_not_found": "Impossibile trovare il testo del messaggio originale da tradurre.",
         "context_menu_no_text": "Impossibile trovare testo da tradurre.",
+        "translating_now": "Sto traducendo il tuo messaggio",
         "channel_admin_required": "Devi essere amministratore del server per modificare le impostazioni del canale.",
         "channel_button_enabled": "I pulsanti di traduzione per {channel} sono ora **abilitati**.",
         "channel_button_disabled": "I pulsanti di traduzione per {channel} sono ora **disabilitati**.",
@@ -1720,6 +1702,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Selecteer eerst een taal.",
         "original_message_not_found": "Kon de originele berichttekst niet vinden om te vertalen.",
         "context_menu_no_text": "Kon geen tekst vinden om te vertalen.",
+        "translating_now": "Je bericht wordt vertaald",
         "channel_admin_required": "Je moet serverbeheerder zijn om kanaalinstellingen te wijzigen.",
         "channel_button_enabled": "Vertaalknoppen voor {channel} zijn nu **ingeschakeld**.",
         "channel_button_disabled": "Vertaalknoppen voor {channel} zijn nu **uitgeschakeld**.",
@@ -1740,6 +1723,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Vui lòng chọn ngôn ngữ trước.",
         "original_message_not_found": "Không tìm thấy nội dung tin nhắn gốc để dịch.",
         "context_menu_no_text": "Không tìm thấy văn bản để dịch.",
+        "translating_now": "Đang dịch tin nhắn của bạn",
         "channel_admin_required": "Bạn phải là quản trị viên máy chủ để thay đổi cài đặt kênh.",
         "channel_button_enabled": "Nút dịch cho {channel} hiện đã **bật**.",
         "channel_button_disabled": "Nút dịch cho {channel} hiện đã **tắt**.",
@@ -1760,6 +1744,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Pumili muna ng wika.",
         "original_message_not_found": "Hindi mahanap ang orihinal na text ng mensahe para isalin.",
         "context_menu_no_text": "Walang mahanap na text na maisasalin.",
+        "translating_now": "Isinasalin ang mensahe mo",
         "channel_admin_required": "Kailangan mong maging server administrator para baguhin ang settings ng channel.",
         "channel_button_enabled": "Ang mga translate button para sa {channel} ay **naka-enable** na.",
         "channel_button_disabled": "Ang mga translate button para sa {channel} ay **naka-disable** na.",
@@ -1780,6 +1765,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Najpierw wybierz język.",
         "original_message_not_found": "Nie udało się znaleźć oryginalnej treści wiadomości do tłumaczenia.",
         "context_menu_no_text": "Nie znaleziono tekstu do przetłumaczenia.",
+        "translating_now": "Tłumaczenie Twojej wiadomości",
         "channel_admin_required": "Musisz być administratorem serwera, aby zmieniać ustawienia kanału.",
         "channel_button_enabled": "Przyciski tłumaczenia dla {channel} są teraz **włączone**.",
         "channel_button_disabled": "Przyciski tłumaczenia dla {channel} są teraz **wyłączone**.",
@@ -1800,6 +1786,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Сначала выберите язык.",
         "original_message_not_found": "Не удалось найти исходный текст сообщения для перевода.",
         "context_menu_no_text": "Не удалось найти текст для перевода.",
+        "translating_now": "Перевод вашего сообщения",
         "channel_admin_required": "Вы должны быть администратором сервера, чтобы менять настройки канала.",
         "channel_button_enabled": "Кнопки перевода для {channel} теперь **включены**.",
         "channel_button_disabled": "Кнопки перевода для {channel} теперь **выключены**.",
@@ -1820,6 +1807,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Спочатку виберіть мову.",
         "original_message_not_found": "Не вдалося знайти оригінальний текст повідомлення для перекладу.",
         "context_menu_no_text": "Не вдалося знайти текст для перекладу.",
+        "translating_now": "Перекладаємо ваше повідомлення",
         "channel_admin_required": "Щоб змінювати налаштування каналу, ви маєте бути адміністратором сервера.",
         "channel_button_enabled": "Кнопки перекладу для {channel} тепер **увімкнені**.",
         "channel_button_disabled": "Кнопки перекладу для {channel} тепер **вимкнені**.",
@@ -1840,6 +1828,7 @@ LOCALE_STRINGS = {
         "select_language_first": "يرجى اختيار لغة أولاً.",
         "original_message_not_found": "تعذر العثور على نص الرسالة الأصلي للترجمة.",
         "context_menu_no_text": "تعذر العثور على نص للترجمة.",
+        "translating_now": "جارٍ ترجمة رسالتك",
         "channel_admin_required": "يجب أن تكون مسؤول الخادم لتغيير إعدادات القناة.",
         "channel_button_enabled": "أزرار الترجمة في {channel} الآن **مفعلة**.",
         "channel_button_disabled": "أزرار الترجمة في {channel} الآن **معطلة**.",
@@ -1860,6 +1849,7 @@ LOCALE_STRINGS = {
         "select_language_first": "कृपया पहले एक भाषा चुनें।",
         "original_message_not_found": "अनुवाद के लिए मूल संदेश का पाठ नहीं मिला।",
         "context_menu_no_text": "अनुवाद के लिए कोई पाठ नहीं मिला।",
+        "translating_now": "आपके संदेश का अनुवाद हो रहा है",
         "channel_admin_required": "चैनल सेटिंग बदलने के लिए आपको सर्वर एडमिन होना चाहिए।",
         "channel_button_enabled": "{channel} के लिए अनुवाद बटन अब **सक्रिय** हैं।",
         "channel_button_disabled": "{channel} के लिए अनुवाद बटन अब **निष्क्रिय** हैं।",
@@ -1880,6 +1870,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Lütfen önce bir dil seçin.",
         "original_message_not_found": "Çevrilecek orijinal mesaj metni bulunamadı.",
         "context_menu_no_text": "Çevrilecek metin bulunamadı.",
+        "translating_now": "Mesajınız çevriliyor",
         "channel_admin_required": "Kanal ayarlarını değiştirmek için sunucu yöneticisi olmalısınız.",
         "channel_button_enabled": "{channel} için çeviri düğmeleri artık **etkin**.",
         "channel_button_disabled": "{channel} için çeviri düğmeleri artık **devre dışı**.",
@@ -1900,6 +1891,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Silakan pilih bahasa terlebih dahulu.",
         "original_message_not_found": "Tidak dapat menemukan teks pesan asli untuk diterjemahkan.",
         "context_menu_no_text": "Tidak dapat menemukan teks untuk diterjemahkan.",
+        "translating_now": "Menerjemahkan pesan Anda",
         "channel_admin_required": "Anda harus menjadi administrator server untuk mengubah pengaturan channel.",
         "channel_button_enabled": "Tombol terjemahan untuk {channel} sekarang **aktif**.",
         "channel_button_disabled": "Tombol terjemahan untuk {channel} sekarang **nonaktif**.",
@@ -1920,6 +1912,7 @@ LOCALE_STRINGS = {
         "select_language_first": "โปรดเลือกภาษาก่อน",
         "original_message_not_found": "ไม่พบข้อความต้นฉบับสำหรับแปล",
         "context_menu_no_text": "ไม่พบข้อความสำหรับแปล",
+        "translating_now": "กำลังแปลข้อความของคุณ",
         "channel_admin_required": "คุณต้องเป็นผู้ดูแลเซิร์ฟเวอร์เพื่อเปลี่ยนการตั้งค่าช่อง",
         "channel_button_enabled": "ปุ่มแปลสำหรับ {channel} ตอนนี้ **เปิดใช้งาน** แล้ว",
         "channel_button_disabled": "ปุ่มแปลสำหรับ {channel} ตอนนี้ **ปิดใช้งาน** แล้ว",
@@ -1940,6 +1933,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Nejprve vyberte jazyk.",
         "original_message_not_found": "Nepodařilo se najít původní text zprávy k překladu.",
         "context_menu_no_text": "Nepodařilo se najít text k překladu.",
+        "translating_now": "Překládáme vaši zprávu",
         "channel_admin_required": "Pro změnu nastavení kanálu musíte být správcem serveru.",
         "channel_button_enabled": "Překladová tlačítka pro {channel} jsou nyní **povolena**.",
         "channel_button_disabled": "Překladová tlačítka pro {channel} jsou nyní **zakázána**.",
@@ -1960,6 +1954,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Selectați mai întâi o limbă.",
         "original_message_not_found": "Nu s-a putut găsi textul mesajului original pentru traducere.",
         "context_menu_no_text": "Nu s-a putut găsi text de tradus.",
+        "translating_now": "Se traduce mesajul dvs.",
         "channel_admin_required": "Trebuie să fii administrator al serverului pentru a schimba setările canalului.",
         "channel_button_enabled": "Butoanele de traducere pentru {channel} sunt acum **activate**.",
         "channel_button_disabled": "Butoanele de traducere pentru {channel} sunt acum **dezactivate**.",
@@ -2485,9 +2480,9 @@ class LanguageSelectView(discord.ui.View):
             user_languages[interaction.user.id] = self.selected_lang
             try:
                 await persist_user_language(interaction.user.id, self.selected_lang)
-                print(f"[{get_timestamp()}] [Language Select] saved language {self.selected_lang} for user {interaction.user.id}")
+                log("Language Select", f"saved language {self.selected_lang} for user {interaction.user.id}")
             except Exception as save_error:
-                print(f"[{get_timestamp()}] [Language Select] failed to save language: {save_error}")
+                log("Language Select", f"failed to save language: {save_error}")
             
             # Update the dropdown placeholder to show the selected language
             lang_display = self.lang_names.get(selected_lang, selected_lang)
@@ -2496,7 +2491,7 @@ class LanguageSelectView(discord.ui.View):
             # Update the ephemeral message to show the selected language in the dropdown
             await interaction.edit_original_response(view=self)
             
-            print(f"[{get_timestamp()}] [Language Select] language {selected_lang} selected by {interaction.user.id}")
+            log("Language Select", f"language {selected_lang} selected by {interaction.user.id}")
             
         except Exception as e:
             traceback.print_exc()
@@ -2562,9 +2557,9 @@ class LanguageSelectView(discord.ui.View):
             user_languages[interaction.user.id] = self.selected_lang
             try:
                 await persist_user_language(interaction.user.id, self.selected_lang)
-                print(f"[{get_timestamp()}] [Language Select] saved language {self.selected_lang} for user {interaction.user.id}")
+                log("Language Select", f"saved language {self.selected_lang} for user {interaction.user.id}")
             except Exception as save_error:
-                print(f"[{get_timestamp()}] [Language Select] failed to save language: {save_error}")
+                log("Language Select", f"failed to save language: {save_error}")
             
             # Translate the original message with the selected language
             user_locale = str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
@@ -2577,8 +2572,6 @@ class LanguageSelectView(discord.ui.View):
             quota_message = get_monthly_limit_message(quota_warning)
             if quota_message:
                 translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
-            embed = discord.Embed(description=translated_text, color=discord.Color.blue())
-
             emit_translation_analytics_event(
                 source="language_select_button",
                 user_id=interaction.user.id,
@@ -2589,10 +2582,10 @@ class LanguageSelectView(discord.ui.View):
                 success=True,
             )
             
-            # Edit the ephemeral message to show the translation
-            await interaction.edit_original_response(embed=embed, view=None)
+            # Edit the ephemeral message to show the translation as plain text.
+            await interaction.edit_original_response(content=translated_text, view=None)
             
-            print(f"[{get_timestamp()}] [Language Select] translation shown for {interaction.user.id}")
+            log("Language Select", f"translation shown for {interaction.user.id}")
             
         except Exception as e:
             emit_translation_analytics_event(
@@ -2617,10 +2610,31 @@ class TranslateButtonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    @staticmethod
+    def _get_translate_button(view: discord.ui.View) -> discord.ui.Button:
+        return next(
+            child for child in view.children
+            if isinstance(child, discord.ui.Button)
+            and child.custom_id == "translate_button"
+        )
+
     @discord.ui.button(style=discord.ButtonStyle.secondary, label="A → 文", custom_id="translate_button")
     async def translate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         target_lang = user_languages.get(user_id)
+        button_message_id = getattr(getattr(interaction, "message", None), "id", None)
+
+        if button_message_id in translation_button_in_progress:
+            await send_response(
+                interaction,
+                content=get_localized_string(
+                    interaction.locale,
+                    "translating_now",
+                    "Translating your message...",
+                ),
+                ephemeral=True,
+            )
+            return
 
         # Fetch message to check length for rate limiting
         original_message = None
@@ -2648,19 +2662,20 @@ class TranslateButtonView(discord.ui.View):
                 content=get_cooldown_warning_message(interaction.locale, retry_after_seconds),
                 ephemeral=True,
             )
-            print(
-                f"[{get_timestamp()}] [Button] rate limited user {interaction.user} retry_after={retry_after_seconds}s"
+            log(
+                "Button",
+                f"rate limited user {interaction.user} retry_after={retry_after_seconds}s"
             )
             return
         
-        print(f"[{get_timestamp()}] [Button] click by {interaction.user} target={target_lang}")
+        log("Button", f"click by {interaction.user} target={target_lang}")
         
         try:
             if original_message is None:
                 try:
                     original_message = await interaction.channel.fetch_message(interaction.message.reference.message_id)
                 except Exception as fetch_error:
-                    print(f"[{get_timestamp()}] [Button] failed to fetch original message: {fetch_error}")
+                    log("Button", f"failed to fetch original message: {fetch_error}")
 
             if original_message is None or not original_message.content:
                 await send_response(
@@ -2710,7 +2725,7 @@ class TranslateButtonView(discord.ui.View):
                         view=view,
                         ephemeral=True
                     )
-                    print(f"[{get_timestamp()}] [Button] showed language selection for {interaction.user.id}")
+                    log("Button", f"showed language selection for {interaction.user.id}")
                     
                 except Exception as e:
                     traceback.print_exc()
@@ -2740,45 +2755,82 @@ class TranslateButtonView(discord.ui.View):
                 try:
                     await interaction.response.defer(ephemeral=True)
                     deferred = True
-                    print(f"[{get_timestamp()}] [Button] deferred interaction {interaction.id}")
+                    log("Button", f"deferred interaction {interaction.id}")
                 except Exception as defer_exc:
                     if isinstance(defer_exc, discord.errors.NotFound):
-                        print(f"[{get_timestamp()}] [Button] defer failed because interaction is already gone: {defer_exc}")
+                        log(
+                            "Button",
+                            f"defer failed because interaction is already gone: {defer_exc}",
+                            logging.WARNING,
+                        )
                         return
                     if isinstance(defer_exc, discord.errors.HTTPException) and defer_exc.status == 400 and defer_exc.code == 40060:
-                        print(f"[{get_timestamp()}] [Button] defer skipped because interaction was already acknowledged: {defer_exc}")
+                        log("Button", f"defer skipped because interaction was already acknowledged: {defer_exc}")
                         return
                     else:
                         raise
 
-            translated_text = await translate_text_async(
-                original_message.content, 
-                target_lang,
-                user_id,
-                str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
-            )
-            quota_message = get_monthly_limit_message(quota_warning)
-            if quota_message:
-                translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
-            embed = discord.Embed(description=translated_text, color=discord.Color.blue())
+            if button_message_id is not None:
+                translation_button_in_progress.add(button_message_id)
 
-            emit_translation_analytics_event(
-                source="button",
-                user_id=interaction.user.id,
-                guild_id=getattr(getattr(interaction, "guild", None), "id", None),
-                channel_id=getattr(getattr(interaction, "channel", None), "id", None),
-                target_lang=target_lang,
-                char_count=len(original_message.content or ""),
-                success=True,
-            )
-            
-            # Send ephemeral message with the translation
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            # Record successful translation for post-translation cooldown
-            record_translation_success(user_id)
-            
-            print(f"[{get_timestamp()}] [Button] translation shown for interaction {interaction.id}")
+            translating_label = get_localized_string(
+                interaction.locale,
+                "translating_now",
+                "Translating...",
+            ).rstrip(". ")
+            busy_view = TranslateButtonView()
+            busy_button = self._get_translate_button(busy_view)
+            busy_button.disabled = True
+            busy_button.label = f"{translating_label}..."
+            if interaction.message is not None:
+                try:
+                    await interaction.message.edit(view=busy_view)
+                except Exception as button_update_error:
+                    log(
+                        "Button",
+                        f"failed to show translation state: "
+                        f"{button_update_error}"
+                    )
+
+            try:
+                translated_text = await translate_text_async(
+                    original_message.content,
+                    target_lang,
+                    user_id,
+                    str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
+                )
+                quota_message = get_monthly_limit_message(quota_warning)
+                if quota_message:
+                    translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
+                emit_translation_analytics_event(
+                    source="button",
+                    user_id=interaction.user.id,
+                    guild_id=getattr(getattr(interaction, "guild", None), "id", None),
+                    channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+                    target_lang=target_lang,
+                    char_count=len(original_message.content or ""),
+                    success=True,
+                )
+
+                # Send ephemeral message with the translation
+                await interaction.followup.send(content=translated_text, ephemeral=True)
+
+                # Record successful translation for post-translation cooldown
+                record_translation_success(user_id)
+
+                log("Button", f"translation shown for interaction {interaction.id}")
+            finally:
+                if interaction.message is not None:
+                    try:
+                        await interaction.message.edit(view=TranslateButtonView())
+                    except Exception as button_update_error:
+                        log(
+                            "Button",
+                            f"failed to restore translation button: "
+                            f"{button_update_error}"
+                        )
+                if button_message_id is not None:
+                    translation_button_in_progress.discard(button_message_id)
             
         except Exception as e:
             emit_translation_analytics_event(
@@ -2800,7 +2852,7 @@ class TranslateButtonView(discord.ui.View):
 
 @client.event
 async def on_ready():
-    print(f'[{get_timestamp()}] Bot is logged in as {client.user}')
+    log("Bot", f"logged in as {client.user}")
     await publish_bot_heartbeat("online")
 
 
@@ -2831,7 +2883,7 @@ async def on_message(message: discord.Message):
             mention_author=False,
         )
     except Exception as e:
-        print(f"[{get_timestamp()}] [Translate] error creating translate button: {e}")
+        log("Translate", f"error creating translate button: {e}")
 
 # 1. Command: Select your preferred translation language
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -2883,6 +2935,7 @@ async def set_language(interaction: discord.Interaction, choice: app_commands.Ch
         message_template.format(language=choice.name),
         ephemeral=True,
     )
+
 
 # 2. Command: Enable or disable auto translate buttons on new messages
 @client.tree.command(name="translate_button", description="Enable or disable translate buttons on new messages in this server.")
@@ -3066,12 +3119,13 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
             content=get_cooldown_warning_message(interaction.locale, retry_after_seconds),
             ephemeral=True,
         )
-        print(
-            f"[{get_timestamp()}] [Context Menu] rate limited user {interaction.user} retry_after={retry_after_seconds}s"
+        log(
+            "Context Menu",
+            f"rate limited user {interaction.user} retry_after={retry_after_seconds}s"
         )
         return
 
-    print(f"[{get_timestamp()}] [Context Menu] invoked by {interaction.user} target={target_lang}")
+    log("Context Menu", f"invoked by {interaction.user} target={target_lang}")
     
     # If no language is saved, show the language selection menu
     if not target_lang:
@@ -3098,7 +3152,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
                 view=view,
                 ephemeral=True
             )
-            print(f"[{get_timestamp()}] [Context Menu] showed language selection for {interaction.user.id}")
+            log("Context Menu", f"showed language selection for {interaction.user.id}")
             
         except Exception as e:
             traceback.print_exc()
@@ -3127,17 +3181,19 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True)
-                print(f"[{get_timestamp()}] [Context Menu] deferred interaction {interaction.id}")
+                log("Context Menu", f"deferred interaction {interaction.id}")
         except Exception as defer_error:
-            print(f"[{get_timestamp()}] [Context Menu] defer failed: {defer_error}")
+            log("Context Menu", f"defer failed: {defer_error}")
 
-        translated_text = translate_text(message.content, target_lang)
+        translated_text = await translate_text_async(
+            message.content,
+            target_lang,
+            interaction.user.id,
+            str(interaction.locale).split("-")[0].lower() if interaction.locale else "en",
+        )
         quota_message = format_quota_error_message(quota_warning)
         if quota_message:
             translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
-
-        # Create a simple Embed with just the translation
-        embed = discord.Embed(description=translated_text, color=discord.Color.blue())
 
         emit_translation_analytics_event(
             source="context_menu",
@@ -3150,12 +3206,12 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         )
 
         # ephemeral=True ensures ONLY the user who clicked 'Translate' sees this result
-        await send_response(interaction, embed=embed, ephemeral=True)
+        await send_response(interaction, content=translated_text, ephemeral=True)
         
         # Record successful translation for post-translation cooldown
         record_translation_success(interaction.user.id)
         
-        print(f"[{get_timestamp()}] [Context Menu] response sent for interaction {interaction.id}")
+        log("Context Menu", f"response sent for interaction {interaction.id}")
     except Exception as e:
         emit_translation_analytics_event(
             source="context_menu",
@@ -3239,4 +3295,4 @@ def load_app_id() -> str:
 
 if __name__ == "__main__":
     TOKEN = load_token()
-    client.run(TOKEN)
+    client.run(TOKEN, log_handler=None)
