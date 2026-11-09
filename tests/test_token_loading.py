@@ -54,19 +54,21 @@ class TokenLoadingTests(unittest.TestCase):
 
 class TranslationRetryTests(unittest.TestCase):
     def test_retries_transient_google_server_error_once(self):
-        translator = unittest.mock.Mock()
-        translator.translate.side_effect = [RuntimeError("Error 500 (Server Error)"), "Hello"]
+        google_translation = unittest.mock.Mock(
+            side_effect=[RuntimeError("Google Cloud Translation HTTP 500: Server Error"), "Hello"]
+        )
 
-        with patch("bot.GoogleTranslator", return_value=translator), patch("bot.time.sleep") as mock_sleep:
+        with patch("bot.ctranslate_url", None), patch("bot.translate_with_google", google_translation), patch("bot.time.sleep") as mock_sleep:
             result = bot.translate_text("Hola", "en")
 
         self.assertEqual(result, "Hello")
-        self.assertEqual(translator.translate.call_count, 2)
+        self.assertEqual(google_translation.call_count, 2)
         mock_sleep.assert_called_once_with(bot.GOOGLE_TRANSLATION_RETRY_DELAY_SECONDS)
 
     def test_uses_mymemory_after_google_server_error(self):
-        translator = unittest.mock.Mock()
-        translator.translate.return_value = "Error 500 (Server Error)"
+        google_translation = unittest.mock.Mock(
+            side_effect=RuntimeError("Google Cloud Translation HTTP 500: Server Error")
+        )
         response = unittest.mock.Mock()
         response.read.return_value = json.dumps({
             "responseStatus": 200,
@@ -75,13 +77,13 @@ class TranslationRetryTests(unittest.TestCase):
         response.__enter__ = unittest.mock.Mock(return_value=response)
         response.__exit__ = unittest.mock.Mock(return_value=False)
 
-        with patch("bot.GoogleTranslator", return_value=translator), patch("bot.time.sleep"), patch(
+        with patch("bot.ctranslate_url", None), patch("bot.translate_with_google", google_translation), patch("bot.time.sleep"), patch(
             "bot.urllib.request.urlopen", return_value=response
         ) as mock_urlopen:
             result = bot.translate_text("Hello", "es")
 
         self.assertEqual(result, "Hola")
-        self.assertEqual(translator.translate.call_count, 2)
+        self.assertEqual(google_translation.call_count, 2)
         mock_urlopen.assert_called_once()
 
     def test_mymemory_detects_explicit_source_language(self):

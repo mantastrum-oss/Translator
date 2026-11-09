@@ -56,9 +56,30 @@ Notes:
 
 - Global sync can take time to propagate (often up to 1 hour, sometimes longer in profile UI).
 
+
+
 ## Changelog
 
 User-facing updates since version 1.0.
+
+### v2.1.2 - 2026-10-08
+
+- Added a static "Translating..." label on the translate button, and the button is disabled while a translation is in progress to prevent repeated clicks.
+- The progress indicator is localized for all supported Discord languages.
+- Translations are now shown as plain text instead of in a boxed embed.
+- Improved handling of long messages: slow translations now switch to backup translation sooner.
+
+### v2.1.1 - 2026-10-07
+
+- Improved translation reliability with automatic backup translation.
+
+### v2.1.0 - 2026-10-06
+
+- Upgraded to a new translation engine for improved translation quality and accuracy.
+
+### v2.0.14 - 2026-09-09
+
+- Stability update.
 
 ### v2.0.2 - 2026-08-07
 
@@ -104,4 +125,3 @@ User-facing updates since version 1.0.
 
 - [Terms of Service](TERMS_OF_SERVICE.md)
 - [Privacy Policy](PRIVACY_POLICY.md)
-

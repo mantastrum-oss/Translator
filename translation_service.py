@@ -12,7 +12,7 @@ from typing import Dict, Optional
 import aiohttp
 import deepl
 from diskcache import Cache
-from deep_translator import GoogleTranslator
+from google_translation import translate_with_google
 
 # Configure structured logging
 logging.basicConfig(
@@ -63,22 +63,34 @@ class ResilientTranslator:
     def __init__(
         self, 
         deepl_api_key: Optional[str] = None, 
-        puter_endpoint: str = "https://api.puter.com/drivers/call/puter-apps/translate",
-        cache_dir: str = './translation_cache'
+        cache_dir: str = './translation_cache',
+        ctranslate_url: Optional[str] = None,
+        ctranslate_api_key: Optional[str] = None,
+        google_translate_api_key: Optional[str] = None,
+        ctranslate_timeout_seconds: float = 30.0,
     ):
         """
         Initialize the resilient translator.
         
         Args:
             deepl_api_key: Optional DeepL API key. If None, DeepL provider is disabled.
-            puter_endpoint: URL endpoint for Puter translation API.
             cache_dir: Directory path for persistent translation cache.
+            ctranslate_url: Base URL of the self-hosted Madlad CTranslate2 API. If None, provider is disabled.
+            ctranslate_api_key: Optional API key for the CTranslate2/NLLB API.
+            google_translate_api_key: Optional Google Cloud Translation API key.
+            ctranslate_timeout_seconds: Maximum time allowed for one CTranslate2 request.
         """
+        if ctranslate_timeout_seconds <= 0:
+            raise ValueError("ctranslate_timeout_seconds must be greater than zero")
+
         self.cache = Cache(cache_dir)
         self.cache_ttl = 60 * 60 * 24 * 7  # 7 days expiration
         self.rate_limiter = RateLimiter(cooldown_seconds=3)
-        self.puter_endpoint = puter_endpoint
         self.deepl_translator = deepl.Translator(deepl_api_key) if deepl_api_key else None
+        self.ctranslate_url = ctranslate_url.rstrip("/") if ctranslate_url else None
+        self.ctranslate_api_key = ctranslate_api_key
+        self.google_translate_api_key = google_translate_api_key
+        self.ctranslate_timeout_seconds = ctranslate_timeout_seconds
 
     async def _execute_with_retry(self, func, retries: int = 2, delay: float = 0.5):
         """
@@ -100,38 +112,45 @@ class ResilientTranslator:
                     raise e
                 await asyncio.sleep(delay * (2 ** attempt))
 
-    async def _fetch_puter_api(self, text: str, target_lang: str) -> str:
+    async def _fetch_ctranslate(self, text: str, source_lang: str, target_lang: str) -> str:
         """
-        HTTP REST bridge for Puter API integration with strict timeout.
+        Queries the self-hosted Madlad CTranslate2 API for a translation.
         
         Args:
             text: Text to translate.
-            target_lang: Target language code.
+            source_lang: ISO 639-1 source language code, or 'auto' for detection.
+            target_lang: ISO 639-1 target language code.
             
         Returns:
-            Translated text from Puter API.
+            Translated text from the CTranslate2/NLLB API.
             
         Raises:
-            Exception: If the API request fails or times out.
+            RuntimeError: If the instance is unreachable or returns an error.
         """
-        payload = {"text": text, "target_language": target_lang.lower()}
-        
+        payload = {"q": text, "source": source_lang, "target": target_lang, "format": "text"}
+        if self.ctranslate_api_key:
+            payload["api_key"] = self.ctranslate_api_key
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self.puter_endpoint, 
-                json=payload, 
-                timeout=aiohttp.ClientTimeout(total=4)
+                f"{self.ctranslate_url}/translate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self.ctranslate_timeout_seconds)
             ) as response:
-                response.raise_for_status()
                 data = await response.json()
-                return data.get("translated_text", "")
+                if response.status != 200:
+                    raise RuntimeError(data.get("error", f"CTranslate2 HTTP {response.status}"))
+                translated = data.get("translatedText")
+                if not translated:
+                    raise RuntimeError("CTranslate2 did not return translated text")
+                return translated
 
     def normalize_lang_code(self, provider: str, lang_code: str) -> str:
         """
         Normalizes language codes according to provider specifications.
         
         Args:
-            provider: Name of the translation provider (google, puter, deepl).
+            provider: Name of the translation provider (google, deepl, ctranslate).
             lang_code: Language code to normalize.
             
         Returns:
@@ -141,7 +160,7 @@ class ResilientTranslator:
         if provider == "deepl":
             # DeepL uses uppercase format (e.g., 'EN-US', 'LT')
             return lang.upper()
-        return lang  # Default lowercase for Google & Puter
+        return lang  # Default lowercase for Google and CTranslate2
 
     async def translate(
         self, 
@@ -157,8 +176,8 @@ class ResilientTranslator:
         1. Input validation and length checks
         2. Rate limit enforcement
         3. Cache lookup
-        4. Provider 1: GoogleTranslator (with retries)
-        5. Provider 2: Puter REST API
+        4. Provider 1: Self-hosted Madlad CTranslate2 (unlimited, no quota)
+        5. Provider 2: Google Cloud Translation API (with retries)
         6. Provider 3: DeepL Official SDK
         7. Fallback localized error response
         
@@ -182,46 +201,57 @@ class ResilientTranslator:
             return messages["rate_limited"]
 
         # 3. Cache Lookup
-        cache_key = f"{text}:{target_lang.lower()}"
+        cache_key = f"madlad-3b-ct2-int8:{text}:{target_lang.lower()}"
         cached_result = self.cache.get(cache_key)
         if cached_result:
             logger.info("Cache hit for translation request.")
             return cached_result
 
-        # Step 1: Google Translator (with Retries)
+        # Step 1: Self-hosted Madlad CTranslate2 (primary provider - no character/rate limits)
+        if self.ctranslate_url:
+            try:
+                logger.info("Attempting Provider: Madlad CTranslate2 (self-hosted)")
+                target = self.normalize_lang_code("ctranslate", target_lang)
+                result = await asyncio.wait_for(
+                    self._execute_with_retry(
+                        lambda: self._fetch_ctranslate(text, "auto", target),
+                        retries=0,
+                    ),
+                    timeout=self.ctranslate_timeout_seconds,
+                )
+                if result:
+                    self.cache.set(cache_key, result, expire=self.cache_ttl)
+                    logger.info("Madlad CTranslate2 succeeded.")
+                    return result
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Madlad CTranslate2 timed out after %.1f seconds; "
+                    "request cancelled before fallback.",
+                    self.ctranslate_timeout_seconds,
+                )
+            except Exception as e:
+                logger.warning(f"Madlad CTranslate2 provider failed: {e}")
+
+        # Step 2: Google Cloud Translation API (with Retries)
         try:
-            logger.info("Attempting Provider: GoogleTranslator")
+            logger.info("Attempting Provider: Google Cloud Translation")
             target = self.normalize_lang_code("google", target_lang)
             loop = asyncio.get_event_loop()
             
             result = await self._execute_with_retry(
                 lambda: loop.run_in_executor(
                     None, 
-                    lambda: GoogleTranslator(source='auto', target=target).translate(text)
+                    lambda: translate_with_google(
+                        text, "auto", target, self.google_translate_api_key
+                    )
                 )
             )
             if result:
                 self.cache.set(cache_key, result, expire=self.cache_ttl)
-                logger.info("GoogleTranslator succeeded.")
+                logger.info("Google Cloud Translation succeeded.")
                 return result
         except Exception as e:
-            logger.warning(f"GoogleTranslator provider failed: {e}")
-
-        # Step 2: Puter API Endpoint
-        try:
-            logger.info("Attempting Provider: Puter API")
-            target = self.normalize_lang_code("puter", target_lang)
-            result = await self._execute_with_retry(
-                lambda: self._fetch_puter_api(text, target)
-            )
-            if result:
-                self.cache.set(cache_key, result, expire=self.cache_ttl)
-                logger.info("Puter API succeeded.")
-                return result
-        except asyncio.TimeoutError:
-            logger.warning("Puter API timed out after 4 seconds.")
-        except Exception as e:
-            logger.warning(f"Puter API provider failed: {e}")
+            logger.warning(f"Google Cloud Translation provider failed: {e}")
 
         # Step 3: DeepL Official SDK
         if self.deepl_translator:

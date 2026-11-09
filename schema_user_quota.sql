@@ -5,7 +5,7 @@
 create table if not exists public.user_monthly_usage (
     user_id text not null,
     month text not null,
-    monthly_limit integer not null default 0,
+    monthly_limit integer not null default 50000,
     used_chars integer not null default 0,
     reset_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),

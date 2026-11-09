@@ -1,23 +1,53 @@
 # Monetization and Character Limit Plan
 
+## Implementation order
+
+This task starts only after `task_Per-User-Monthly-Character-Quota.md` is
+implemented and its tests pass. The per-user quota task owns enforcement and
+usage accounting; this task owns payment selection, payment verification,
+idempotency, and applying a verified character bonus.
+
+### To Do checklist
+
+- [ ] Design the `/donate` slash command and its ephemeral response
+- [ ] Implement donation button logic for the four fixed EUR offers
+- [ ] Integrate the Ko-fi webhook for Ko-fi payments received through PayPal or card
+- [ ] Update the user's current-month character limit from a verified donation
+- [ ] Log transactions idempotently and refresh the user's quota data immediately
+
+The checklist is ordered. A later item must not be enabled in production until
+the preceding item's tests and acceptance criteria pass.
+
 ## Overview
 
-A hybrid monetization model that serves two contexts:
-- **Guilds**: Guild owner pays for the entire guild's translation quota
-- **DMs**: Individual users pay for personal translation quota in direct messages
+The first monetization release is a one-time donation flow for individual
+Discord users. Ko-fi handles the checkout and can route payment through PayPal
+or card providers. A verified donation adds a fixed character bonus to the
+user's current monthly quota.
+
+Guild subscriptions remain a separate future scope. They must not be mixed into
+the first Ko-fi implementation.
 
 ## Quota Logic
 
 ```
-Translation Request
+Discord user
     ↓
-Is it in a Guild?
-    ├─ YES → Check Guild Quota (guild owner's tier applies)
-    └─ NO (DMs) → Check User Quota (user's personal tier applies)
+/donate (ephemeral response)
     ↓
-Proceed with translation
+Choose fixed EUR offer
     ↓
-Increment appropriate counter (guild or user)
+Ko-fi checkout (PayPal/card)
+    ↓
+Ko-fi webhook
+    ↓
+Verify token + transaction ID + Discord user ID
+    ↓
+Save donation once
+    ↓
+Increase current-month user monthly_limit
+    ↓
+Invalidate quota cache and notify user
 ```
 
 ## Pricing Tiers
@@ -30,22 +60,24 @@ Increment appropriate counter (guild or user)
 | Pro | 250,000 characters | $9.99/month |
 | Enterprise | Unlimited | Custom pricing |
 
-### User Subscriptions (Personal DM Quota)
+### Donation Offers (Personal User Quota)
 
-| Tier | Monthly Limit | Price |
-|------|---------------|-------|
-| Free | 15,000 characters | $0 |
-| Pro | 100,000 characters | $2.99/month |
-| Enterprise | Unlimited | Custom pricing |
+| Donation | Character bonus |
+|------|---------------|
+| 1 EUR | +50,000 characters |
+| 2 EUR | +100,000 characters |
+| 3 EUR | +300,000 characters |
+| 5 EUR | +500,000 characters |
 
 ## Key Behaviors
 
-- ✅ User in guild uses translator → Guild owner's tier applies to quota check
-- ✅ User in DMs uses translator → User's personal tier applies to quota check
-- ✅ Same user can have different quotas in guild vs DMs
-- ✅ Guild owner controls guild quota independently from their personal quota
-- ✅ Clear separation of billing: guild subscription ≠ personal subscription
-- ✅ Guild owner cannot be bypassed by having users subscribe (guild quota checked first)
+- ✅ The bonus applies to the Discord user ID found in the payment message
+- ✅ A donation changes `monthly_limit`, never `used_chars`
+- ✅ A donation is applied to the current UTC month only
+- ✅ The same Ko-fi transaction can be processed only once
+- ✅ Missing or invalid Discord ID is rejected or sent to manual review
+- ✅ Payment processing never bypasses the normal quota check
+- ✅ Guild quota behavior remains unchanged until guild billing is implemented separately
 
 ## User-Facing Error Messages
 
@@ -59,7 +91,7 @@ Ask the guild owner to upgrade
 ### DM Context (Free Tier Reached)
 
 ```
-📊 You've reached your monthly translation limit (15,000 characters). 
+📊 You've reached your monthly translation limit (50,000 characters). 
 Upgrade your plan
 ```
 
@@ -70,7 +102,7 @@ Upgrade your plan
 
 ## Database Schema
 
-### Guild Tiers Table
+### Guild Tiers Table (future scope)
 
 ```sql
 CREATE TABLE guild_tiers (
@@ -90,7 +122,7 @@ VALUES
   ('enterprise', 0);  -- 0 = unlimited
 ```
 
-### User Tiers Table
+### User Tiers Table (future scope)
 
 ```sql
 CREATE TABLE user_tiers (
@@ -105,7 +137,7 @@ CREATE TABLE user_tiers (
 -- Seed default tiers
 INSERT INTO user_tiers (tier, monthly_limit) 
 VALUES 
-  ('free', 15000),
+    ('free', 50000),
   ('pro', 100000),
   ('enterprise', 0);  -- 0 = unlimited
 ```
@@ -258,8 +290,8 @@ WHERE guild_id = '123456789';
 
 ```
 Current Tier: Free
-Monthly Limit: 15,000 characters
-Usage This Month: 12,500 / 15,000 (83%)
+Monthly Limit: 50,000 characters
+Usage This Month: 42,500 / 50,000 (85%)
 
 [Upgrade to Pro] [Upgrade to Enterprise]
 ```
@@ -273,22 +305,25 @@ ON CONFLICT (user_id) DO UPDATE SET tier = 'pro', monthly_limit = 100000;
 
 ## Billing Integration Points
 
-1. **Stripe/Payment Gateway**: Handle subscription management
-2. **Webhook Listener**: Update tier on successful payment
-3. **Renewal Handler**: Auto-renew or cancel subscriptions
-4. **Invoice Generation**: Per-guild and per-user invoices
+The first release uses Ko-fi rather than Stripe subscriptions:
 
-Example webhook handler:
+1. **Donation command**: `/donate` responds ephemerally with the user's Discord ID and four link buttons.
+2. **Payment provider**: Ko-fi checkout receives the selected EUR amount; PayPal is handled by Ko-fi.
+3. **Webhook listener**: Receive Ko-fi's form-encoded `data` payload at a public HTTPS endpoint.
+4. **Verification**: Compare Ko-fi's `verification_token`, validate currency and exact supported amount, and extract a 17-20 digit Discord ID from the payment message.
+5. **Idempotency**: Use the unique Ko-fi transaction/reference ID before changing quota.
+6. **Atomic update**: Save the donation and increase `user_monthly_usage.monthly_limit` in one database operation or transaction.
+7. **Refresh**: Invalidate the user's quota cache and send an optional Discord DM after successful processing.
+8. **Manual review**: Store unmatched, unsupported, duplicate, and failed webhook events without granting characters.
+
+Example payment mapping:
 ```python
-@app.post("/webhooks/subscription-updated")
-async def handle_subscription_updated(event: dict):
-    entity_type = event.get("entity_type")  # 'guild' or 'user'
-    entity_id = event.get("entity_id")
-    new_tier = event.get("tier")
-    
-    table = "guild_tiers" if entity_type == "guild" else "user_tiers"
-    supabase_request("PATCH", table, {"tier": new_tier}, 
-                    query=f"?{entity_type}_id=eq.{entity_id}")
+DONATION_OFFERS = {
+    "1.00": 50000,
+    "2.00": 100000,
+    "3.00": 300000,
+    "5.00": 500000,
+}
 ```
 
 ## Testing Checklist
@@ -296,9 +331,18 @@ async def handle_subscription_updated(event: dict):
 - [ ] User in guild with free tier can translate up to 50k/month
 - [ ] User in guild with free tier blocked after 50k
 - [ ] User in guild with pro tier can translate up to 250k/month
-- [ ] User in DMs with free tier can translate up to 15k/month
-- [ ] User in DMs with free tier blocked after 15k
-- [ ] User in DMs with pro tier can translate up to 100k/month
+- [ ] User starts with the configured 50k free monthly limit
+- [ ] `/donate` is visible only to the invoking user and shows all four offers
+- [ ] Each button opens the correct Ko-fi payment URL
+- [ ] Ko-fi webhook rejects an invalid verification token
+- [ ] Ko-fi webhook rejects unsupported amounts, currencies, and missing Discord IDs
+- [ ] A valid 1/2/3/5 EUR donation maps to exactly 50k/100k/300k/500k characters
+- [ ] Duplicate webhook delivery does not grant characters twice
+- [ ] A successful donation increases `monthly_limit` without changing `used_chars`
+- [ ] A donation for a new user creates the current-month quota row correctly
+- [ ] Quota cache is refreshed immediately after a successful donation
+- [ ] User receives a success or manual-review status without exposing payment secrets
+- [ ] User in DMs with the resulting limit is blocked only after that limit is reached
 - [ ] Warning messages shown at 80% and 90% usage (guild)
 - [ ] Warning messages shown at 80% and 90% usage (DM)
 - [ ] Quota resets monthly (guild uses date, user uses month string)
@@ -308,15 +352,22 @@ async def handle_subscription_updated(event: dict):
 
 ## Migration Path
 
-1. **Phase 1**: Deploy guild tier lookup (keep existing hardcoded 15k limit temporarily)
-2. **Phase 2**: Add user tier table and DM quota tracking
-3. **Phase 3**: Remove hardcoded MONTHLY_CHARACTER_LIMIT usage for guilds
-4. **Phase 4**: Launch billing dashboard and payment integration
-5. **Phase 5**: Enable subscription management
+1. **Phase 1**: Complete and verify `task_Per-User-Monthly-Character-Quota.md`.
+2. **Phase 2**: Add the `donations` table, fixed offer mapping, and environment configuration.
+3. **Phase 3**: Add `/donate` and link buttons using Ko-fi URLs.
+4. **Phase 4**: Add the public HTTPS Ko-fi webhook with verification and idempotency.
+5. **Phase 5**: Apply the bonus atomically, invalidate cache, notify the user, and run integration tests.
+6. **Phase 6**: Consider guild subscriptions and dashboard billing as a separate project.
 
 ## Environment Variables
 
-No new environment variables needed. Configuration is read from `guild_tiers` and `user_tiers` tables.
+Required configuration should be supplied through the deployment environment, never committed:
+
+- `KOFI_VERIFICATION_TOKEN`
+- `KOFI_1_EUR_URL`, `KOFI_2_EUR_URL`, `KOFI_3_EUR_URL`, `KOFI_5_EUR_URL`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- Discord bot token and any webhook server bind/URL settings already used by deployment
 
 Existing variables remain:
 - `SUPABASE_URL`
