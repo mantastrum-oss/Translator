@@ -5,3 +5,4 @@ __pycache__/
 bot_data.json
 translation_cache/
 translator.zip
+CLAUDE.md
