@@ -64,7 +64,7 @@ User-facing updates since version 1.0.
 
 ### v2.1.4 - 2026-11-09
 
-- After tapping the translate button you now see a small private "Translating your message..." note in your own Discord language, which turns into the translation when it's ready.
+- After tapping the translate button you now see a small private "Translating..." note in your own Discord language, which turns into the translation when it's ready.
 - The translate button no longer changes for everyone in the channel while someone is translating, and several people can translate the same message at once.
 
 ### v2.1.3 - 2026-11-09
