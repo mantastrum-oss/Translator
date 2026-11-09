@@ -62,6 +62,14 @@ Notes:
 
 User-facing updates since version 1.0.
 
+### v2.1.5 - 2026-11-09
+
+- Code is no longer translated: code blocks and `inline code` stay exactly as written, and messages that are pasted code (HTML, CSS, JavaScript, PHP and similar) get no translate button.
+- Links, @mentions, #channels, roles, custom emoji, timestamps and emoji are kept unchanged in translations (emoji are no longer occasionally lost).
+- Spoilers stay hidden in translations, and headings and quotes keep their formatting.
+- No translate button under messages with nothing to translate: only links, mentions or emoji, a single character, other bots' commands like `!play`, or messages over 1900 characters.
+- Long translations that don't fit in one Discord message now continue in a second private message instead of failing.
+
 ### v2.1.4 - 2026-11-09
 
 - After tapping the translate button you now see a small private "Translating..." note in your own Discord language, which turns into the translation when it's ready.

@@ -100,6 +100,19 @@ class TranslateButtonStatusTests(unittest.IsolatedAsyncioTestCase):
 
         interaction.followup.send.assert_awaited_once_with(content="Labas visiems", ephemeral=True)
 
+    async def test_translation_over_discord_limit_continues_in_extra_messages(self):
+        interaction = make_interaction()
+        long_translation = "\n".join(f"Eilutė {i} su keliais žodžiais" for i in range(150))
+        await self.click(interaction, AsyncMock(return_value=long_translation))
+
+        first = interaction.edit_original_response.await_args.kwargs["content"]
+        rest = [call.kwargs["content"] for call in interaction.followup.send.await_args_list]
+        self.assertTrue(rest)
+        self.assertTrue(all(len(part) <= 2000 for part in [first, *rest]))
+        self.assertEqual("\n".join([first, *rest]), long_translation)
+        for call in interaction.followup.send.await_args_list:
+            self.assertTrue(call.kwargs["ephemeral"])
+
 
 if __name__ == "__main__":
     unittest.main()
