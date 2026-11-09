@@ -62,6 +62,12 @@ Notes:
 
 User-facing updates since version 1.0.
 
+### v2.1.6 - 2026-11-10
+
+- The bot's messages and commands are now available in Bulgarian, Croatian, Danish, Greek, Hungarian, Norwegian and Finnish, so every Discord language is covered.
+- The "too fast" and "taking a quick break" notices are now translated into every supported language.
+- Finnish users no longer see some messages in Filipino.
+
 ### v2.1.5 - 2026-11-09
 
 - Code is no longer translated: code blocks and `inline code` stay exactly as written, and messages that are pasted code (HTML, CSS, JavaScript, PHP and similar) get no translate button.

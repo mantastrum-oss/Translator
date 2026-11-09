@@ -47,8 +47,9 @@ class LocalizedStringLookupTests(unittest.TestCase):
     def test_finnish_does_not_get_filipino(self):
         self.assertEqual(
             bot.get_localized_string(discord.Locale.finnish, KEY, "DEFAULT"),
-            strings_for("en-US")[KEY],
+            strings_for("fi")[KEY],
         )
+        self.assertNotEqual(strings_for("fi")[KEY], strings_for("fil")[KEY])
 
     def test_regional_variant_falls_back_to_same_language(self):
         self.assertEqual(
@@ -58,6 +59,43 @@ class LocalizedStringLookupTests(unittest.TestCase):
 
     def test_missing_locale_falls_back_to_english(self):
         self.assertEqual(bot.get_localized_string(None, KEY, "DEFAULT"), strings_for("en-US")[KEY])
+
+    def test_every_discord_locale_has_its_own_strings(self):
+        # All 32 Discord client languages are localized; none falls back to English.
+        own = {loc.lower().split("-")[0] for loc in bot.LOCALE_STRINGS}
+        for locale in discord.Locale:
+            with self.subTest(locale=str(locale)):
+                self.assertIn(str(locale).lower().split("-")[0], own)
+
+    def test_every_locale_has_every_used_string(self):
+        unused = {"translation_ready", "translate_error_generic"}  # not referenced by the bot
+        required = set(strings_for("en-US")) - unused
+        for loc, strings in bot.LOCALE_STRINGS.items():
+            with self.subTest(locale=loc):
+                self.assertEqual(sorted(required - set(strings)), [])
+
+    def test_placeholders_match_english(self):
+        import re
+        english = strings_for("en-US")
+        for loc, strings in bot.LOCALE_STRINGS.items():
+            for key, text in strings.items():
+                with self.subTest(locale=loc, key=key):
+                    self.assertEqual(
+                        sorted(re.findall(r"\{\w+\}", text)), sorted(re.findall(r"\{\w+\}", english[key]))
+                    )
+
+    def test_command_localizations_are_complete_and_valid(self):
+        import re
+        name_keys = {"language", "translate_button", "translate_button_channel", "choice", "state", "channel"}
+        reference = set(bot.COMMAND_TEXT_LOCALIZATIONS["lt"])
+        for loc, strings in bot.COMMAND_TEXT_LOCALIZATIONS.items():
+            with self.subTest(locale=loc):
+                self.assertEqual(set(strings), reference)
+                for key in name_keys:  # Discord: lowercase, no spaces, <= 32 chars (Devanagari/Thai allowed)
+                    self.assertRegex(strings[key], r"^\S{1,32}$")
+                    self.assertEqual(strings[key], strings[key].lower())
+                for value in strings.values():
+                    self.assertLessEqual(len(value), 100)
 
     def test_translating_note_is_short(self):
         self.assertEqual(strings_for("en-US")[KEY], "Translating...")
