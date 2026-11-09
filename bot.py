@@ -925,7 +925,6 @@ TRANSLATE_LARGE_MESSAGE_COOLDOWN_MULTIPLIER = 0.01  # 1 sec per 100 chars
 
 translate_button_taps_by_user: dict[int, list[float]] = {}
 translate_last_success_by_user: dict[int, float] = {}  # Track post-translation cooldown
-translation_button_in_progress: set[int] = set()
 
 ANALYTICS_COLLECTOR_URL = get_local_config_value("ANALYTICS_COLLECTOR_URL").rstrip("/")
 ANALYTICS_API_KEY = get_local_config_value("ANALYTICS_API_KEY")
@@ -1379,6 +1378,19 @@ async def send_response(interaction: discord.Interaction, **kwargs):
                 return None
             traceback.print_exc()
             return None
+
+async def edit_translation_status(interaction: discord.Interaction, content: str) -> None:
+    """Replace the private "Translating..." reply with the final content.
+
+    Falls back to a new private message if the original reply can't be edited.
+    """
+    try:
+        await interaction.edit_original_response(content=content)
+        return
+    except Exception as exc:
+        log("Button", f"failed to update translating message: {exc}")
+    await send_response(interaction, content=content, ephemeral=True)
+
 
 # Localized strings for different Discord locales
 LOCALE_STRINGS = {
@@ -2611,31 +2623,10 @@ class TranslateButtonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @staticmethod
-    def _get_translate_button(view: discord.ui.View) -> discord.ui.Button:
-        return next(
-            child for child in view.children
-            if isinstance(child, discord.ui.Button)
-            and child.custom_id == "translate_button"
-        )
-
     @discord.ui.button(style=discord.ButtonStyle.secondary, label="A → 文", custom_id="translate_button")
     async def translate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         target_lang = user_languages.get(user_id)
-        button_message_id = getattr(getattr(interaction, "message", None), "id", None)
-
-        if button_message_id in translation_button_in_progress:
-            await send_response(
-                interaction,
-                content=get_localized_string(
-                    interaction.locale,
-                    "translating_now",
-                    "Translating your message...",
-                ),
-                ephemeral=True,
-            )
-            return
 
         # Fetch message to check length for rate limiting
         original_message = None
@@ -2750,48 +2741,27 @@ class TranslateButtonView(discord.ui.View):
                 )
                 return
 
-            # Language is already saved, translate and show result
-            deferred = False
+            # Language is already saved. Acknowledge with a private, localized
+            # "Translating..." message, then replace it with the translation.
+            # The public message is never edited (shared label + channel rate limits).
             if not interaction.response.is_done():
                 try:
-                    await interaction.response.defer(ephemeral=True)
-                    deferred = True
-                    log("Button", f"deferred interaction {interaction.id}")
-                except Exception as defer_exc:
-                    if isinstance(defer_exc, discord.errors.NotFound):
+                    await interaction.response.send_message(
+                        content=f"-# {get_localized_string(interaction.locale, 'translating_now', 'Translating your message...')}",
+                        ephemeral=True,
+                    )
+                except Exception as ack_exc:
+                    if isinstance(ack_exc, discord.errors.NotFound):
                         log(
                             "Button",
-                            f"defer failed because interaction is already gone: {defer_exc}",
+                            f"acknowledge failed because interaction is already gone: {ack_exc}",
                             logging.WARNING,
                         )
                         return
-                    if isinstance(defer_exc, discord.errors.HTTPException) and defer_exc.status == 400 and defer_exc.code == 40060:
-                        log("Button", f"defer skipped because interaction was already acknowledged: {defer_exc}")
+                    if isinstance(ack_exc, discord.errors.HTTPException) and ack_exc.status == 400 and ack_exc.code == 40060:
+                        log("Button", f"acknowledge skipped because interaction was already acknowledged: {ack_exc}")
                         return
-                    else:
-                        raise
-
-            if button_message_id is not None:
-                translation_button_in_progress.add(button_message_id)
-
-            translating_label = get_localized_string(
-                interaction.locale,
-                "translating_now",
-                "Translating...",
-            ).rstrip(". ")
-            busy_view = TranslateButtonView()
-            busy_button = self._get_translate_button(busy_view)
-            busy_button.disabled = True
-            busy_button.label = f"{translating_label}..."
-            if interaction.message is not None:
-                try:
-                    await interaction.message.edit(view=busy_view)
-                except Exception as button_update_error:
-                    log(
-                        "Button",
-                        f"failed to show translation state: "
-                        f"{button_update_error}"
-                    )
+                    raise
 
             try:
                 translated_text = await translate_text_async(
@@ -2800,9 +2770,7 @@ class TranslateButtonView(discord.ui.View):
                     user_id,
                     str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
                 )
-                quota_message = get_monthly_limit_message(quota_warning)
-                if quota_message:
-                    translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
+            except Exception as translate_exc:
                 emit_translation_analytics_event(
                     source="button",
                     user_id=interaction.user.id,
@@ -2810,29 +2778,34 @@ class TranslateButtonView(discord.ui.View):
                     channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                     target_lang=target_lang,
                     char_count=len(original_message.content or ""),
-                    success=True,
+                    success=False,
+                    error_code=normalize_analytics_error_code(translate_exc),
                 )
+                traceback.print_exc()
+                await edit_translation_status(interaction, get_maintenance_error_message(interaction.locale))
+                return
 
-                # Send ephemeral message with the translation
-                await interaction.followup.send(content=translated_text, ephemeral=True)
+            quota_message = get_monthly_limit_message(quota_warning)
+            if quota_message:
+                translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
+            emit_translation_analytics_event(
+                source="button",
+                user_id=interaction.user.id,
+                guild_id=getattr(getattr(interaction, "guild", None), "id", None),
+                channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+                target_lang=target_lang,
+                char_count=len(original_message.content or ""),
+                success=True,
+            )
 
-                # Record successful translation for post-translation cooldown
-                record_translation_success(user_id)
+            # Replace the "Translating..." message with the translation
+            await edit_translation_status(interaction, translated_text)
 
-                log("Button", f"translation shown for interaction {interaction.id}")
-            finally:
-                if interaction.message is not None:
-                    try:
-                        await interaction.message.edit(view=TranslateButtonView())
-                    except Exception as button_update_error:
-                        log(
-                            "Button",
-                            f"failed to restore translation button: "
-                            f"{button_update_error}"
-                        )
-                if button_message_id is not None:
-                    translation_button_in_progress.discard(button_message_id)
-            
+            # Record successful translation for post-translation cooldown
+            record_translation_success(user_id)
+
+            log("Button", f"translation shown for interaction {interaction.id}")
+
         except Exception as e:
             emit_translation_analytics_event(
                 source="button",
