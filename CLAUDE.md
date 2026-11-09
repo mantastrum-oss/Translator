@@ -3,7 +3,7 @@
 Production Discord bot ("Translator") used by many servers. Adds an `A → 文` button under messages and a
 `Translate` message context-menu; each user gets a private (ephemeral) translation into their saved language.
 This repo is the **controller**: it runs the bot and talks to all supporting services (self-hosted MT server,
-Google/DeepL, Supabase, analytics dashboard, Ko-fi). Repo: `github.com/mantastrum-oss/Translator`.
+Google/DeepL, Supabase, analytics dashboard). Repo: `github.com/mantastrum-oss/Translator`.
 
 ## Run / test
 
@@ -30,9 +30,8 @@ Google/DeepL, Supabase, analytics dashboard, Ko-fi). Repo: `github.com/mantastru
 | `translation_service.py` | `ResilientTranslator`: length check (1900), per-user 3s limiter, diskcache (7d, `./translation_cache`), provider chain. |
 | `google_translation.py` | Google Cloud Translation v2 REST client (API key). |
 | `user_quota.py` | Per-user monthly character quota in Supabase `user_monthly_usage`; 30s in-memory cache; fail-closed. |
-| `donation_webhook.py` | aiohttp Ko-fi webhook `POST /api/webhooks/kofi` → Supabase RPC `apply_donation` (idempotent). |
 | `console_log.py` | `log(tag, msg)` — unified `HH:MM:SS LEVEL Tag msg` console output, Europe/Helsinki time. Level is auto-picked from words ("failed"/"error" → ERROR, "denied"/"timeout" → WARN). |
-| `schema_user_quota.sql`, `schema_donations.sql` | Supabase DDL (run manually in the Supabase SQL editor). |
+| `schema_user_quota.sql` | Supabase DDL (run manually in the Supabase SQL editor). |
 | `README.md` | User-facing feature list + **changelog** (update it for user-visible changes, newest version on top). |
 | `task_*.md`, `report.md` | Specs/reports written for earlier tasks (historical context, may be outdated). |
 
@@ -66,20 +65,22 @@ the prefix. Keep that convention or change it everywhere at once.
   `guild_settings`, `channel_overrides` are loaded into memory (`user_languages`, `settings` globals); writes go
   to Supabase and fall back to JSON on error.
 - Supabase tables: `user_languages`, `guild_settings`, `channel_overrides`, `blocked_users`, `bot_logs`,
-  `user_monthly_usage`, `donations` (+ RPC `apply_donation`).
+  `user_monthly_usage`. (Supabase may still contain a leftover `donations` table + `apply_donation` RPC
+  from the removed Ko-fi integration; unused by code.)
 - Analytics/heartbeat → the **TranslatorDahsboard** project (`../TranslatorDahsboard`, FastAPI + React +
   Postgres): `POST {ANALYTICS_COLLECTOR_URL}/v1/events/translation` and `/api/bot/heartbeat` every 30s,
   header `X-API-Key`. Message text is never sent — only metadata. The dashboard also manages `blocked_users`.
   Changing event payloads requires a matching change there.
-- Ko-fi webhook server only starts if `KOFI_VERIFICATION_TOKEN` and Supabase are configured (port 8080).
-  Offers: €1/2/3/5 → +50k/100k/300k/500k chars for the current month; Discord user ID must be in the donation message.
+- Payments: none right now. Ko-fi donations were removed (2026-11-09); **Stripe is planned** instead.
+  `user_quota.add_user_quota_bonus_async` and `invalidate_user_quota_cache` are kept, provider-agnostic,
+  for granting paid characters later. Ko-fi code is in git history (commit `b3d6177`) if ever needed.
 
 ## Env vars (.env, never commit, never print values)
 
 `DISCORD_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APP_ID`, `STORAGE_BACKEND`, `STORAGE_IMPORT_JSON`,
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_TRANSLATE_API_KEY`, `DEEPL_API_KEY`, `CTRANSLATE_URL`,
 `CTRANSLATE_API_KEY`, `CTRANSLATE_TIMEOUT_SECONDS`, `ANALYTICS_COLLECTOR_URL`, `ANALYTICS_API_KEY`,
-`USER_MONTHLY_CHARACTER_LIMIT` (default 50000), `KOFI_VERIFICATION_TOKEN`, `KOFI_WEBHOOK_HOST/PORT`.
+`USER_MONTHLY_CHARACTER_LIMIT` (default 50000).
 
 ## Localization
 

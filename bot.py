@@ -13,7 +13,6 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
-from aiohttp import web
 from langdetect import DetectorFactory, LangDetectException, detect
 from google_translation import translate_with_google
 
@@ -46,7 +45,6 @@ setup_logging()
 
 from translation_service import ResilientTranslator
 from user_quota import check_user_quota, update_user_quota_async
-from donation_webhook import create_kofi_webhook_app
 
 DetectorFactory.seed = 0
 
@@ -933,8 +931,6 @@ ANALYTICS_API_KEY = get_local_config_value("ANALYTICS_API_KEY")
 ANALYTICS_TIMEOUT_SECONDS = float(get_local_config_value("ANALYTICS_TIMEOUT_SECONDS", "0.8"))
 ANALYTICS_MAX_QUEUE_SIZE = int(get_local_config_value("ANALYTICS_MAX_QUEUE_SIZE", "1000"))
 ANALYTICS_RETRY_LIMIT = int(get_local_config_value("ANALYTICS_RETRY_LIMIT", "2"))
-KOFI_WEBHOOK_HOST = get_local_config_value("KOFI_WEBHOOK_HOST", "0.0.0.0")
-KOFI_WEBHOOK_PORT = int(get_local_config_value("KOFI_WEBHOOK_PORT", "8080"))
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 HEARTBEAT_TIMEOUT_SECONDS = 0.8
 HEARTBEAT_RETRY_LIMIT = 2
@@ -944,35 +940,6 @@ analytics_event_queue: asyncio.Queue[dict] | None = None
 analytics_worker_task: asyncio.Task | None = None
 heartbeat_worker_task: asyncio.Task | None = None
 heartbeat_status = "starting"
-donation_webhook_runner: web.AppRunner | None = None
-
-
-async def start_donation_webhook() -> None:
-    """Start the Ko-fi webhook endpoint once when the Discord bot is ready."""
-    global donation_webhook_runner
-
-    if donation_webhook_runner is not None:
-        return
-    if not get_local_config_value("KOFI_VERIFICATION_TOKEN"):
-        log("Donations", f"webhook disabled: KOFI_VERIFICATION_TOKEN is missing")
-        return
-    if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
-        log("Donations", f"webhook disabled: Supabase is not configured")
-        return
-
-    try:
-        donation_webhook_runner = web.AppRunner(create_kofi_webhook_app())
-        await donation_webhook_runner.setup()
-        site = web.TCPSite(donation_webhook_runner, KOFI_WEBHOOK_HOST, KOFI_WEBHOOK_PORT)
-        await site.start()
-        log(
-            "Donations",
-            f"webhook listening on "
-            f"{KOFI_WEBHOOK_HOST}:{KOFI_WEBHOOK_PORT}"
-        )
-    except Exception as exc:
-        donation_webhook_runner = None
-        log("Donations", f"webhook failed to start: {type(exc).__name__}")
 
 
 def analytics_is_enabled() -> bool:
@@ -2886,7 +2853,6 @@ class TranslateButtonView(discord.ui.View):
 @client.event
 async def on_ready():
     log("Bot", f"logged in as {client.user}")
-    await start_donation_webhook()
     await publish_bot_heartbeat("online")
 
 

@@ -180,7 +180,7 @@ def _update_user_quota_sync(user_id: str, month: str, char_count: int) -> bool:
 def _add_user_quota_bonus_sync(user_id: str, month: str, char_bonus: int) -> bool:
     """Increase only the current month's limit for a user.
 
-    This operation is intended for verified external grants such as donations.
+    This operation is intended for verified external grants such as payments.
     It preserves ``used_chars`` and invalidates the local quota cache after a
     successful upsert.
     """
