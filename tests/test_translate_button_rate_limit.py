@@ -136,6 +136,9 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
             async def defer(self, ephemeral=True):
                 self._done = True
 
+            async def send_message(self, **kwargs):
+                self._done = True
+
         class FakeFollowup:
             async def send(self, *args, **kwargs):
                 return None
@@ -156,6 +159,7 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
                 followup=FakeFollowup(),
                 channel=FakeChannel(),
                 message=SimpleNamespace(reference=SimpleNamespace(message_id=123)),
+                edit_original_response=AsyncMock(),
             )
 
         view = bot.TranslateButtonView()
@@ -194,63 +198,6 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
                 "success": False,
                 "error_code": "rate_limited",
             })
-
-    async def test_translation_button_is_static_and_disabled_while_translating(self):
-        class FakeResponse:
-            def is_done(self):
-                return False
-
-            async def defer(self, *args, **kwargs):
-                return None
-
-        class FakeFollowup:
-            async def send(self, *args, **kwargs):
-                return None
-
-        class FakeChannel:
-            async def fetch_message(self, message_id):
-                return SimpleNamespace(content="Hello world")
-
-        edits = []
-
-        class FakeMessage:
-            id = 987654
-            reference = SimpleNamespace(message_id=123)
-
-            async def edit(self, *, view):
-                button = next(
-                    child for child in view.children
-                    if getattr(child, "custom_id", "") == "translate_button"
-                )
-                edits.append((button.label, button.disabled))
-
-        interaction = SimpleNamespace(
-            user=SimpleNamespace(id=424242),
-            locale="en-US",
-            id=1,
-            guild=None,
-            response=FakeResponse(),
-            followup=FakeFollowup(),
-            channel=FakeChannel(),
-            message=FakeMessage(),
-        )
-        view = bot.TranslateButtonView()
-        button_item = next(
-            child for child in view.children
-            if getattr(child, "custom_id", "") == "translate_button"
-        )
-
-        with patch.dict(bot.user_languages, {424242: "en"}), \
-             patch("bot.is_translation_blocked", new_callable=AsyncMock, return_value=False), \
-             patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
-             patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
-             patch("bot.emit_translation_analytics_event"):
-            await bot.TranslateButtonView.translate_button(view, interaction, button_item)
-
-        self.assertEqual(len(edits), 2)
-        self.assertTrue(edits[0][1])
-        self.assertTrue(edits[0][0].endswith("..."))
-        self.assertFalse(edits[1][1])
 
 
 if __name__ == "__main__":

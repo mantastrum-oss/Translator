@@ -925,7 +925,6 @@ TRANSLATE_LARGE_MESSAGE_COOLDOWN_MULTIPLIER = 0.01  # 1 sec per 100 chars
 
 translate_button_taps_by_user: dict[int, list[float]] = {}
 translate_last_success_by_user: dict[int, float] = {}  # Track post-translation cooldown
-translation_button_in_progress: set[int] = set()
 
 ANALYTICS_COLLECTOR_URL = get_local_config_value("ANALYTICS_COLLECTOR_URL").rstrip("/")
 ANALYTICS_API_KEY = get_local_config_value("ANALYTICS_API_KEY")
@@ -1380,6 +1379,19 @@ async def send_response(interaction: discord.Interaction, **kwargs):
             traceback.print_exc()
             return None
 
+async def edit_translation_status(interaction: discord.Interaction, content: str) -> None:
+    """Replace the private "Translating..." reply with the final content.
+
+    Falls back to a new private message if the original reply can't be edited.
+    """
+    try:
+        await interaction.edit_original_response(content=content)
+        return
+    except Exception as exc:
+        log("Button", f"failed to update translating message: {exc}")
+    await send_response(interaction, content=content, ephemeral=True)
+
+
 # Localized strings for different Discord locales
 LOCALE_STRINGS = {
     "en-US": {
@@ -1391,7 +1403,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Please select a language first.",
         "original_message_not_found": "Could not find the original message text to translate.",
         "context_menu_no_text": "Could not find any text to translate.",
-        "translating_now": "Translating your message...",
+        "translating_now": "Translating...",
         "translation_ready": "Done. Here is your translation.",
         "translate_error_generic": "Something went wrong while translating. Please try again.",
         "cooldown_warning": "You are going a little too fast. Try again in {seconds}s.",
@@ -1416,7 +1428,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Please select a language first.",
         "original_message_not_found": "Could not find the original message text to translate.",
         "context_menu_no_text": "Could not find any text to translate.",
-        "translating_now": "Translating your message...",
+        "translating_now": "Translating...",
         "translation_ready": "Done. Here is your translation.",
         "translate_error_generic": "Something went wrong while translating. Please try again.",
         "cooldown_warning": "You are going a little too fast. Try again in {seconds}s.",
@@ -1441,7 +1453,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Pirmiausia pasirinkite kalbą.",
         "original_message_not_found": "Nepavyko rasti originalaus žinutės teksto vertimui.",
         "context_menu_no_text": "Nepavyko rasti teksto vertimui.",
-        "translating_now": "Verčiama jūsų žinutė...",
+        "translating_now": "Verčiama...",
         "translation_ready": "Atlikta. Štai jūsų vertimas.",
         "translate_error_generic": "Verčiant įvyko klaida. Bandykite dar kartą.",
         "cooldown_warning": "Šiek tiek per greitai. Bandykite dar kartą po {seconds} s.",
@@ -1466,7 +1478,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Bitte wähle zuerst eine Sprache aus.",
         "original_message_not_found": "Der ursprüngliche Nachrichtentext zum Übersetzen konnte nicht gefunden werden.",
         "context_menu_no_text": "Es konnte kein Text zum Übersetzen gefunden werden.",
-        "translating_now": "Deine Nachricht wird übersetzt...",
+        "translating_now": "Wird übersetzt...",
         "translation_ready": "Fertig. Hier ist deine Übersetzung.",
         "translate_error_generic": "Beim Übersetzen ist ein Fehler aufgetreten. Bitte versuch es erneut.",
         "cooldown_warning": "Du bist etwas zu schnell. Versuch es in {seconds} Sek. erneut.",
@@ -1490,7 +1502,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Primero selecciona un idioma.",
         "original_message_not_found": "No se pudo encontrar el texto original del mensaje para traducir.",
         "context_menu_no_text": "No se pudo encontrar texto para traducir.",
-        "translating_now": "Traduciendo tu mensaje...",
+        "translating_now": "Traduciendo...",
         "translation_ready": "Listo. Aquí tienes tu traducción.",
         "translate_error_generic": "Algo salió mal al traducir. Inténtalo de nuevo.",
         "cooldown_warning": "Vas un poco demasiado rápido. Inténtalo de nuevo en {seconds}s.",
@@ -1514,7 +1526,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Veuillez d'abord sélectionner une langue.",
         "original_message_not_found": "Impossible de trouver le texte du message d'origine à traduire.",
         "context_menu_no_text": "Impossible de trouver du texte à traduire.",
-        "translating_now": "Traduction de votre message...",
+        "translating_now": "Traduction...",
         "translation_ready": "C’est fait. Voici votre traduction.",
         "translate_error_generic": "Une erreur s’est produite pendant la traduction. Veuillez réessayer.",
         "cooldown_warning": "Vous allez un peu trop vite. Réessayez dans {seconds}s.",
@@ -1538,7 +1550,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Selecione um idioma primeiro.",
         "original_message_not_found": "Não foi possível encontrar o texto original da mensagem para traduzir.",
         "context_menu_no_text": "Não foi possível encontrar texto para traduzir.",
-        "translating_now": "Traduzindo sua mensagem...",
+        "translating_now": "Traduzindo...",
         "translation_ready": "Pronto. Aqui está sua tradução.",
         "translate_error_generic": "Algo deu errado ao traduzir. Tente novamente.",
         "cooldown_warning": "Você está indo um pouco rápido demais. Tente novamente em {seconds}s.",
@@ -1562,7 +1574,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Välj ett språk först.",
         "original_message_not_found": "Det gick inte att hitta originalmeddelandet att översätta.",
         "context_menu_no_text": "Det gick inte att hitta någon text att översätta.",
-        "translating_now": "Översätter ditt meddelande...",
+        "translating_now": "Översätter...",
         "translation_ready": "Klart. Här är din översättning.",
         "translate_error_generic": "Något gick fel vid översättningen. Försök igen.",
         "cooldown_warning": "Du går lite för snabbt. Försök igen om {seconds}s.",
@@ -1586,7 +1598,7 @@ LOCALE_STRINGS = {
         "select_language_first": "最初に言語を選択してください。",
         "original_message_not_found": "翻訳する元のメッセージ本文が見つかりませんでした。",
         "context_menu_no_text": "翻訳するテキストが見つかりませんでした。",
-        "translating_now": "メッセージを翻訳しています...",
+        "translating_now": "翻訳中...",
         "translation_ready": "完了しました。翻訳はこちらです。",
         "translate_error_generic": "翻訳中に問題が発生しました。もう一度お試しください。",
         "cooldown_warning": "少し速すぎます。{seconds}秒後にもう一度お試しください。",
@@ -1610,7 +1622,7 @@ LOCALE_STRINGS = {
         "select_language_first": "请先选择语言。",
         "original_message_not_found": "找不到可翻译的原始消息文本。",
         "context_menu_no_text": "找不到可翻译的文本。",
-        "translating_now": "正在翻译你的消息...",
+        "translating_now": "正在翻译...",
         "translation_ready": "完成了。以下是你的翻译。",
         "translate_error_generic": "翻译时出现问题。请重试。",
         "cooldown_warning": "你点得有点太快了。请在 {seconds} 秒后重试。",
@@ -1634,7 +1646,7 @@ LOCALE_STRINGS = {
         "select_language_first": "請先選擇語言。",
         "original_message_not_found": "找不到可翻譯的原始訊息文字。",
         "context_menu_no_text": "找不到可翻譯的文字。",
-        "translating_now": "正在翻譯您的訊息...",
+        "translating_now": "正在翻譯...",
         "translation_ready": "完成了。以下是您的翻譯。",
         "translate_error_generic": "翻譯時發生問題。請再試一次。",
         "cooldown_warning": "您點擊得有點太快了。請在 {seconds} 秒後再試一次。",
@@ -1658,7 +1670,7 @@ LOCALE_STRINGS = {
         "select_language_first": "먼저 언어를 선택하세요.",
         "original_message_not_found": "번역할 원본 메시지 텍스트를 찾을 수 없습니다.",
         "context_menu_no_text": "번역할 텍스트를 찾을 수 없습니다.",
-        "translating_now": "메시지를 번역하는 중이에요...",
+        "translating_now": "번역 중...",
         "translation_ready": "완료됐어요. 번역 결과를 확인해 주세요.",
         "translate_error_generic": "번역 중 문제가 발생했어요. 다시 시도해 주세요.",
         "cooldown_warning": "조금 너무 빠르게 누르고 있어요. {seconds}초 후에 다시 시도해 주세요.",
@@ -1682,7 +1694,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Seleziona prima una lingua.",
         "original_message_not_found": "Impossibile trovare il testo del messaggio originale da tradurre.",
         "context_menu_no_text": "Impossibile trovare testo da tradurre.",
-        "translating_now": "Sto traducendo il tuo messaggio",
+        "translating_now": "Traduzione in corso...",
         "channel_admin_required": "Devi essere amministratore del server per modificare le impostazioni del canale.",
         "channel_button_enabled": "I pulsanti di traduzione per {channel} sono ora **abilitati**.",
         "channel_button_disabled": "I pulsanti di traduzione per {channel} sono ora **disabilitati**.",
@@ -1703,7 +1715,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Selecteer eerst een taal.",
         "original_message_not_found": "Kon de originele berichttekst niet vinden om te vertalen.",
         "context_menu_no_text": "Kon geen tekst vinden om te vertalen.",
-        "translating_now": "Je bericht wordt vertaald",
+        "translating_now": "Bezig met vertalen...",
         "channel_admin_required": "Je moet serverbeheerder zijn om kanaalinstellingen te wijzigen.",
         "channel_button_enabled": "Vertaalknoppen voor {channel} zijn nu **ingeschakeld**.",
         "channel_button_disabled": "Vertaalknoppen voor {channel} zijn nu **uitgeschakeld**.",
@@ -1724,7 +1736,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Vui lòng chọn ngôn ngữ trước.",
         "original_message_not_found": "Không tìm thấy nội dung tin nhắn gốc để dịch.",
         "context_menu_no_text": "Không tìm thấy văn bản để dịch.",
-        "translating_now": "Đang dịch tin nhắn của bạn",
+        "translating_now": "Đang dịch...",
         "channel_admin_required": "Bạn phải là quản trị viên máy chủ để thay đổi cài đặt kênh.",
         "channel_button_enabled": "Nút dịch cho {channel} hiện đã **bật**.",
         "channel_button_disabled": "Nút dịch cho {channel} hiện đã **tắt**.",
@@ -1745,7 +1757,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Pumili muna ng wika.",
         "original_message_not_found": "Hindi mahanap ang orihinal na text ng mensahe para isalin.",
         "context_menu_no_text": "Walang mahanap na text na maisasalin.",
-        "translating_now": "Isinasalin ang mensahe mo",
+        "translating_now": "Isinasalin...",
         "channel_admin_required": "Kailangan mong maging server administrator para baguhin ang settings ng channel.",
         "channel_button_enabled": "Ang mga translate button para sa {channel} ay **naka-enable** na.",
         "channel_button_disabled": "Ang mga translate button para sa {channel} ay **naka-disable** na.",
@@ -1766,7 +1778,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Najpierw wybierz język.",
         "original_message_not_found": "Nie udało się znaleźć oryginalnej treści wiadomości do tłumaczenia.",
         "context_menu_no_text": "Nie znaleziono tekstu do przetłumaczenia.",
-        "translating_now": "Tłumaczenie Twojej wiadomości",
+        "translating_now": "Tłumaczenie...",
         "channel_admin_required": "Musisz być administratorem serwera, aby zmieniać ustawienia kanału.",
         "channel_button_enabled": "Przyciski tłumaczenia dla {channel} są teraz **włączone**.",
         "channel_button_disabled": "Przyciski tłumaczenia dla {channel} są teraz **wyłączone**.",
@@ -1787,7 +1799,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Сначала выберите язык.",
         "original_message_not_found": "Не удалось найти исходный текст сообщения для перевода.",
         "context_menu_no_text": "Не удалось найти текст для перевода.",
-        "translating_now": "Перевод вашего сообщения",
+        "translating_now": "Перевод...",
         "channel_admin_required": "Вы должны быть администратором сервера, чтобы менять настройки канала.",
         "channel_button_enabled": "Кнопки перевода для {channel} теперь **включены**.",
         "channel_button_disabled": "Кнопки перевода для {channel} теперь **выключены**.",
@@ -1808,7 +1820,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Спочатку виберіть мову.",
         "original_message_not_found": "Не вдалося знайти оригінальний текст повідомлення для перекладу.",
         "context_menu_no_text": "Не вдалося знайти текст для перекладу.",
-        "translating_now": "Перекладаємо ваше повідомлення",
+        "translating_now": "Переклад...",
         "channel_admin_required": "Щоб змінювати налаштування каналу, ви маєте бути адміністратором сервера.",
         "channel_button_enabled": "Кнопки перекладу для {channel} тепер **увімкнені**.",
         "channel_button_disabled": "Кнопки перекладу для {channel} тепер **вимкнені**.",
@@ -1829,7 +1841,7 @@ LOCALE_STRINGS = {
         "select_language_first": "يرجى اختيار لغة أولاً.",
         "original_message_not_found": "تعذر العثور على نص الرسالة الأصلي للترجمة.",
         "context_menu_no_text": "تعذر العثور على نص للترجمة.",
-        "translating_now": "جارٍ ترجمة رسالتك",
+        "translating_now": "جارٍ الترجمة...",
         "channel_admin_required": "يجب أن تكون مسؤول الخادم لتغيير إعدادات القناة.",
         "channel_button_enabled": "أزرار الترجمة في {channel} الآن **مفعلة**.",
         "channel_button_disabled": "أزرار الترجمة في {channel} الآن **معطلة**.",
@@ -1850,7 +1862,7 @@ LOCALE_STRINGS = {
         "select_language_first": "कृपया पहले एक भाषा चुनें।",
         "original_message_not_found": "अनुवाद के लिए मूल संदेश का पाठ नहीं मिला।",
         "context_menu_no_text": "अनुवाद के लिए कोई पाठ नहीं मिला।",
-        "translating_now": "आपके संदेश का अनुवाद हो रहा है",
+        "translating_now": "अनुवाद हो रहा है...",
         "channel_admin_required": "चैनल सेटिंग बदलने के लिए आपको सर्वर एडमिन होना चाहिए।",
         "channel_button_enabled": "{channel} के लिए अनुवाद बटन अब **सक्रिय** हैं।",
         "channel_button_disabled": "{channel} के लिए अनुवाद बटन अब **निष्क्रिय** हैं।",
@@ -1871,7 +1883,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Lütfen önce bir dil seçin.",
         "original_message_not_found": "Çevrilecek orijinal mesaj metni bulunamadı.",
         "context_menu_no_text": "Çevrilecek metin bulunamadı.",
-        "translating_now": "Mesajınız çevriliyor",
+        "translating_now": "Çevriliyor...",
         "channel_admin_required": "Kanal ayarlarını değiştirmek için sunucu yöneticisi olmalısınız.",
         "channel_button_enabled": "{channel} için çeviri düğmeleri artık **etkin**.",
         "channel_button_disabled": "{channel} için çeviri düğmeleri artık **devre dışı**.",
@@ -1892,7 +1904,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Silakan pilih bahasa terlebih dahulu.",
         "original_message_not_found": "Tidak dapat menemukan teks pesan asli untuk diterjemahkan.",
         "context_menu_no_text": "Tidak dapat menemukan teks untuk diterjemahkan.",
-        "translating_now": "Menerjemahkan pesan Anda",
+        "translating_now": "Menerjemahkan...",
         "channel_admin_required": "Anda harus menjadi administrator server untuk mengubah pengaturan channel.",
         "channel_button_enabled": "Tombol terjemahan untuk {channel} sekarang **aktif**.",
         "channel_button_disabled": "Tombol terjemahan untuk {channel} sekarang **nonaktif**.",
@@ -1913,7 +1925,7 @@ LOCALE_STRINGS = {
         "select_language_first": "โปรดเลือกภาษาก่อน",
         "original_message_not_found": "ไม่พบข้อความต้นฉบับสำหรับแปล",
         "context_menu_no_text": "ไม่พบข้อความสำหรับแปล",
-        "translating_now": "กำลังแปลข้อความของคุณ",
+        "translating_now": "กำลังแปล...",
         "channel_admin_required": "คุณต้องเป็นผู้ดูแลเซิร์ฟเวอร์เพื่อเปลี่ยนการตั้งค่าช่อง",
         "channel_button_enabled": "ปุ่มแปลสำหรับ {channel} ตอนนี้ **เปิดใช้งาน** แล้ว",
         "channel_button_disabled": "ปุ่มแปลสำหรับ {channel} ตอนนี้ **ปิดใช้งาน** แล้ว",
@@ -1934,7 +1946,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Nejprve vyberte jazyk.",
         "original_message_not_found": "Nepodařilo se najít původní text zprávy k překladu.",
         "context_menu_no_text": "Nepodařilo se najít text k překladu.",
-        "translating_now": "Překládáme vaši zprávu",
+        "translating_now": "Překládá se...",
         "channel_admin_required": "Pro změnu nastavení kanálu musíte být správcem serveru.",
         "channel_button_enabled": "Překladová tlačítka pro {channel} jsou nyní **povolena**.",
         "channel_button_disabled": "Překladová tlačítka pro {channel} jsou nyní **zakázána**.",
@@ -1955,7 +1967,7 @@ LOCALE_STRINGS = {
         "select_language_first": "Selectați mai întâi o limbă.",
         "original_message_not_found": "Nu s-a putut găsi textul mesajului original pentru traducere.",
         "context_menu_no_text": "Nu s-a putut găsi text de tradus.",
-        "translating_now": "Se traduce mesajul dvs.",
+        "translating_now": "Se traduce...",
         "channel_admin_required": "Trebuie să fii administrator al serverului pentru a schimba setările canalului.",
         "channel_button_enabled": "Butoanele de traducere pentru {channel} sunt acum **activate**.",
         "channel_button_disabled": "Butoanele de traducere pentru {channel} sunt acum **dezactivate**.",
@@ -2361,15 +2373,17 @@ def get_localized_string(locale: str | None, key: str, default: str) -> str:
     
     # Convert Discord Locale enum to string if needed
     locale = str(locale).lower()
-    
-    # Try exact match
-    if locale in LOCALE_STRINGS:
-        return LOCALE_STRINGS[locale].get(key, default)
-    
-    # Try language code only (e.g., "en" from "en-US")
+
+    # Try exact match (case-insensitive: Discord sends "zh-TW", keys may differ in case)
+    for loc, strings in LOCALE_STRINGS.items():
+        if loc.lower() == locale:
+            return strings.get(key, default)
+
+    # Try the same language with another region (e.g. "es-419" -> "es-ES").
+    # Compare whole language codes so "fi" (Finnish) never matches "fil" (Filipino).
     lang_code = locale.split("-")[0]
     for loc, strings in LOCALE_STRINGS.items():
-        if loc.lower().startswith(lang_code):
+        if loc.lower().split("-")[0] == lang_code:
             return strings.get(key, default)
     
     # Fallback to English
@@ -2611,31 +2625,10 @@ class TranslateButtonView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @staticmethod
-    def _get_translate_button(view: discord.ui.View) -> discord.ui.Button:
-        return next(
-            child for child in view.children
-            if isinstance(child, discord.ui.Button)
-            and child.custom_id == "translate_button"
-        )
-
     @discord.ui.button(style=discord.ButtonStyle.secondary, label="A → 文", custom_id="translate_button")
     async def translate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         target_lang = user_languages.get(user_id)
-        button_message_id = getattr(getattr(interaction, "message", None), "id", None)
-
-        if button_message_id in translation_button_in_progress:
-            await send_response(
-                interaction,
-                content=get_localized_string(
-                    interaction.locale,
-                    "translating_now",
-                    "Translating your message...",
-                ),
-                ephemeral=True,
-            )
-            return
 
         # Fetch message to check length for rate limiting
         original_message = None
@@ -2750,48 +2743,27 @@ class TranslateButtonView(discord.ui.View):
                 )
                 return
 
-            # Language is already saved, translate and show result
-            deferred = False
+            # Language is already saved. Acknowledge with a private, localized
+            # "Translating..." message, then replace it with the translation.
+            # The public message is never edited (shared label + channel rate limits).
             if not interaction.response.is_done():
                 try:
-                    await interaction.response.defer(ephemeral=True)
-                    deferred = True
-                    log("Button", f"deferred interaction {interaction.id}")
-                except Exception as defer_exc:
-                    if isinstance(defer_exc, discord.errors.NotFound):
+                    await interaction.response.send_message(
+                        content=f"-# {get_localized_string(interaction.locale, 'translating_now', 'Translating...')}",
+                        ephemeral=True,
+                    )
+                except Exception as ack_exc:
+                    if isinstance(ack_exc, discord.errors.NotFound):
                         log(
                             "Button",
-                            f"defer failed because interaction is already gone: {defer_exc}",
+                            f"acknowledge failed because interaction is already gone: {ack_exc}",
                             logging.WARNING,
                         )
                         return
-                    if isinstance(defer_exc, discord.errors.HTTPException) and defer_exc.status == 400 and defer_exc.code == 40060:
-                        log("Button", f"defer skipped because interaction was already acknowledged: {defer_exc}")
+                    if isinstance(ack_exc, discord.errors.HTTPException) and ack_exc.status == 400 and ack_exc.code == 40060:
+                        log("Button", f"acknowledge skipped because interaction was already acknowledged: {ack_exc}")
                         return
-                    else:
-                        raise
-
-            if button_message_id is not None:
-                translation_button_in_progress.add(button_message_id)
-
-            translating_label = get_localized_string(
-                interaction.locale,
-                "translating_now",
-                "Translating...",
-            ).rstrip(". ")
-            busy_view = TranslateButtonView()
-            busy_button = self._get_translate_button(busy_view)
-            busy_button.disabled = True
-            busy_button.label = f"{translating_label}..."
-            if interaction.message is not None:
-                try:
-                    await interaction.message.edit(view=busy_view)
-                except Exception as button_update_error:
-                    log(
-                        "Button",
-                        f"failed to show translation state: "
-                        f"{button_update_error}"
-                    )
+                    raise
 
             try:
                 translated_text = await translate_text_async(
@@ -2800,9 +2772,7 @@ class TranslateButtonView(discord.ui.View):
                     user_id,
                     str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
                 )
-                quota_message = get_monthly_limit_message(quota_warning)
-                if quota_message:
-                    translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
+            except Exception as translate_exc:
                 emit_translation_analytics_event(
                     source="button",
                     user_id=interaction.user.id,
@@ -2810,29 +2780,34 @@ class TranslateButtonView(discord.ui.View):
                     channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                     target_lang=target_lang,
                     char_count=len(original_message.content or ""),
-                    success=True,
+                    success=False,
+                    error_code=normalize_analytics_error_code(translate_exc),
                 )
+                traceback.print_exc()
+                await edit_translation_status(interaction, get_maintenance_error_message(interaction.locale))
+                return
 
-                # Send ephemeral message with the translation
-                await interaction.followup.send(content=translated_text, ephemeral=True)
+            quota_message = get_monthly_limit_message(quota_warning)
+            if quota_message:
+                translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
+            emit_translation_analytics_event(
+                source="button",
+                user_id=interaction.user.id,
+                guild_id=getattr(getattr(interaction, "guild", None), "id", None),
+                channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+                target_lang=target_lang,
+                char_count=len(original_message.content or ""),
+                success=True,
+            )
 
-                # Record successful translation for post-translation cooldown
-                record_translation_success(user_id)
+            # Replace the "Translating..." message with the translation
+            await edit_translation_status(interaction, translated_text)
 
-                log("Button", f"translation shown for interaction {interaction.id}")
-            finally:
-                if interaction.message is not None:
-                    try:
-                        await interaction.message.edit(view=TranslateButtonView())
-                    except Exception as button_update_error:
-                        log(
-                            "Button",
-                            f"failed to restore translation button: "
-                            f"{button_update_error}"
-                        )
-                if button_message_id is not None:
-                    translation_button_in_progress.discard(button_message_id)
-            
+            # Record successful translation for post-translation cooldown
+            record_translation_success(user_id)
+
+            log("Button", f"translation shown for interaction {interaction.id}")
+
         except Exception as e:
             emit_translation_analytics_event(
                 source="button",
