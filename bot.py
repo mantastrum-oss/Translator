@@ -46,6 +46,7 @@ setup_logging()
 from translation_service import ResilientTranslator
 import user_quota
 from user_quota import check_user_quota, update_user_quota_async
+from content_filter import get_skip_reason, protect_segments, restore_segments, split_for_discord
 
 DetectorFactory.seed = 0
 
@@ -864,8 +865,9 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
     target_lang = normalize_language_code(target_lang)
     text = normalize_discord_emoji_markdown(text)
     
-    # Extract emojis before translation (helps with Japanese and mixed-content text)
-    text_without_emojis, emojis = extract_emojis_and_preserve_text(text)
+    # Swap code, links, mentions, custom emoji and emoji for {n} markers so the
+    # translator never touches them (and they don't count toward quota).
+    text_without_emojis, protected_segments = protect_segments(text)
     
     # STEP 1: Check per-user monthly quota (FAIL-CLOSED)
     # This happens BEFORE any translation provider is called
@@ -896,8 +898,10 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
                 # Quota update failed; log but don't block the translation
                 log("Quota", f"failed to update quota for user {user_id}")
         
-        # Restore emojis after translation
-        return restore_emojis(translated, emojis)
+        # Put protected parts back (skip for error strings)
+        if translated.startswith("⚠️") or translated.startswith("⏳"):
+            return translated
+        return restore_segments(translated, protected_segments)
     
     except Exception as exc:
         logger_msg = f"Translation error: {exc}"
@@ -1379,17 +1383,37 @@ async def send_response(interaction: discord.Interaction, **kwargs):
             traceback.print_exc()
             return None
 
-async def edit_translation_status(interaction: discord.Interaction, content: str) -> None:
+def get_skip_reason_message(locale, reason: str) -> str:
+    """Localized explanation for content_filter.get_skip_reason results."""
+    if reason == "code":
+        return get_localized_string(locale, "code_not_translated", "Code isn't translated.")
+    if reason == "too_long":
+        return get_localized_string(
+            locale, "message_too_long", "This message is too long to translate (max 1900 characters)."
+        )
+    return get_localized_string(locale, "context_menu_no_text", "Could not find any text to translate.")
+
+
+async def edit_translation_status(interaction: discord.Interaction, content: str, **edit_kwargs) -> None:
     """Replace the private "Translating..." reply with the final content.
 
-    Falls back to a new private message if the original reply can't be edited.
+    Content over Discord's 2000-character limit continues in extra private
+    messages. Falls back to a new private message if the reply can't be edited.
     """
+    first, *rest = split_for_discord(content) or [content]
     try:
-        await interaction.edit_original_response(content=content)
-        return
+        await interaction.edit_original_response(content=first, **edit_kwargs)
     except Exception as exc:
         log("Button", f"failed to update translating message: {exc}")
-    await send_response(interaction, content=content, ephemeral=True)
+        await send_response(interaction, content=first, ephemeral=True)
+    for chunk in rest:
+        await send_response(interaction, content=chunk, ephemeral=True)
+
+
+async def send_translation(interaction: discord.Interaction, content: str) -> None:
+    """Send a translation privately, split into several messages if over 2000 characters."""
+    for chunk in split_for_discord(content) or [content]:
+        await send_response(interaction, content=chunk, ephemeral=True)
 
 
 # Localized strings for different Discord locales
@@ -1403,6 +1427,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Please select a language first.",
         "original_message_not_found": "Could not find the original message text to translate.",
         "context_menu_no_text": "Could not find any text to translate.",
+        "code_not_translated": "Code isn't translated.",
+        "message_too_long": "This message is too long to translate (max 1900 characters).",
         "translating_now": "Translating...",
         "translation_ready": "Done. Here is your translation.",
         "translate_error_generic": "Something went wrong while translating. Please try again.",
@@ -1428,6 +1454,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Please select a language first.",
         "original_message_not_found": "Could not find the original message text to translate.",
         "context_menu_no_text": "Could not find any text to translate.",
+        "code_not_translated": "Code isn't translated.",
+        "message_too_long": "This message is too long to translate (max 1900 characters).",
         "translating_now": "Translating...",
         "translation_ready": "Done. Here is your translation.",
         "translate_error_generic": "Something went wrong while translating. Please try again.",
@@ -1453,6 +1481,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Pirmiausia pasirinkite kalbą.",
         "original_message_not_found": "Nepavyko rasti originalaus žinutės teksto vertimui.",
         "context_menu_no_text": "Nepavyko rasti teksto vertimui.",
+        "code_not_translated": "Kodas neverčiamas.",
+        "message_too_long": "Žinutė per ilga vertimui (daugiausia 1900 simbolių).",
         "translating_now": "Verčiama...",
         "translation_ready": "Atlikta. Štai jūsų vertimas.",
         "translate_error_generic": "Verčiant įvyko klaida. Bandykite dar kartą.",
@@ -1478,6 +1508,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Bitte wähle zuerst eine Sprache aus.",
         "original_message_not_found": "Der ursprüngliche Nachrichtentext zum Übersetzen konnte nicht gefunden werden.",
         "context_menu_no_text": "Es konnte kein Text zum Übersetzen gefunden werden.",
+        "code_not_translated": "Code wird nicht übersetzt.",
+        "message_too_long": "Diese Nachricht ist zu lang zum Übersetzen (max. 1900 Zeichen).",
         "translating_now": "Wird übersetzt...",
         "translation_ready": "Fertig. Hier ist deine Übersetzung.",
         "translate_error_generic": "Beim Übersetzen ist ein Fehler aufgetreten. Bitte versuch es erneut.",
@@ -1502,6 +1534,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Primero selecciona un idioma.",
         "original_message_not_found": "No se pudo encontrar el texto original del mensaje para traducir.",
         "context_menu_no_text": "No se pudo encontrar texto para traducir.",
+        "code_not_translated": "El código no se traduce.",
+        "message_too_long": "Este mensaje es demasiado largo para traducirlo (máx. 1900 caracteres).",
         "translating_now": "Traduciendo...",
         "translation_ready": "Listo. Aquí tienes tu traducción.",
         "translate_error_generic": "Algo salió mal al traducir. Inténtalo de nuevo.",
@@ -1526,6 +1560,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Veuillez d'abord sélectionner une langue.",
         "original_message_not_found": "Impossible de trouver le texte du message d'origine à traduire.",
         "context_menu_no_text": "Impossible de trouver du texte à traduire.",
+        "code_not_translated": "Le code n'est pas traduit.",
+        "message_too_long": "Ce message est trop long pour être traduit (1900 caractères max.).",
         "translating_now": "Traduction...",
         "translation_ready": "C’est fait. Voici votre traduction.",
         "translate_error_generic": "Une erreur s’est produite pendant la traduction. Veuillez réessayer.",
@@ -1550,6 +1586,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Selecione um idioma primeiro.",
         "original_message_not_found": "Não foi possível encontrar o texto original da mensagem para traduzir.",
         "context_menu_no_text": "Não foi possível encontrar texto para traduzir.",
+        "code_not_translated": "Código não é traduzido.",
+        "message_too_long": "Esta mensagem é longa demais para traduzir (máx. 1900 caracteres).",
         "translating_now": "Traduzindo...",
         "translation_ready": "Pronto. Aqui está sua tradução.",
         "translate_error_generic": "Algo deu errado ao traduzir. Tente novamente.",
@@ -1574,6 +1612,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Välj ett språk först.",
         "original_message_not_found": "Det gick inte att hitta originalmeddelandet att översätta.",
         "context_menu_no_text": "Det gick inte att hitta någon text att översätta.",
+        "code_not_translated": "Kod översätts inte.",
+        "message_too_long": "Meddelandet är för långt för att översättas (max 1900 tecken).",
         "translating_now": "Översätter...",
         "translation_ready": "Klart. Här är din översättning.",
         "translate_error_generic": "Något gick fel vid översättningen. Försök igen.",
@@ -1598,6 +1638,8 @@ LOCALE_STRINGS = {
         "select_language_first": "最初に言語を選択してください。",
         "original_message_not_found": "翻訳する元のメッセージ本文が見つかりませんでした。",
         "context_menu_no_text": "翻訳するテキストが見つかりませんでした。",
+        "code_not_translated": "コードは翻訳されません。",
+        "message_too_long": "このメッセージは長すぎて翻訳できません（最大1900文字）。",
         "translating_now": "翻訳中...",
         "translation_ready": "完了しました。翻訳はこちらです。",
         "translate_error_generic": "翻訳中に問題が発生しました。もう一度お試しください。",
@@ -1622,6 +1664,8 @@ LOCALE_STRINGS = {
         "select_language_first": "请先选择语言。",
         "original_message_not_found": "找不到可翻译的原始消息文本。",
         "context_menu_no_text": "找不到可翻译的文本。",
+        "code_not_translated": "代码不会被翻译。",
+        "message_too_long": "此消息过长，无法翻译（最多 1900 个字符）。",
         "translating_now": "正在翻译...",
         "translation_ready": "完成了。以下是你的翻译。",
         "translate_error_generic": "翻译时出现问题。请重试。",
@@ -1646,6 +1690,8 @@ LOCALE_STRINGS = {
         "select_language_first": "請先選擇語言。",
         "original_message_not_found": "找不到可翻譯的原始訊息文字。",
         "context_menu_no_text": "找不到可翻譯的文字。",
+        "code_not_translated": "程式碼不會被翻譯。",
+        "message_too_long": "此訊息過長，無法翻譯（最多 1900 個字元）。",
         "translating_now": "正在翻譯...",
         "translation_ready": "完成了。以下是您的翻譯。",
         "translate_error_generic": "翻譯時發生問題。請再試一次。",
@@ -1670,6 +1716,8 @@ LOCALE_STRINGS = {
         "select_language_first": "먼저 언어를 선택하세요.",
         "original_message_not_found": "번역할 원본 메시지 텍스트를 찾을 수 없습니다.",
         "context_menu_no_text": "번역할 텍스트를 찾을 수 없습니다.",
+        "code_not_translated": "코드는 번역되지 않아요.",
+        "message_too_long": "메시지가 너무 길어 번역할 수 없어요 (최대 1900자).",
         "translating_now": "번역 중...",
         "translation_ready": "완료됐어요. 번역 결과를 확인해 주세요.",
         "translate_error_generic": "번역 중 문제가 발생했어요. 다시 시도해 주세요.",
@@ -1694,6 +1742,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Seleziona prima una lingua.",
         "original_message_not_found": "Impossibile trovare il testo del messaggio originale da tradurre.",
         "context_menu_no_text": "Impossibile trovare testo da tradurre.",
+        "code_not_translated": "Il codice non viene tradotto.",
+        "message_too_long": "Questo messaggio è troppo lungo da tradurre (max 1900 caratteri).",
         "translating_now": "Traduzione in corso...",
         "channel_admin_required": "Devi essere amministratore del server per modificare le impostazioni del canale.",
         "channel_button_enabled": "I pulsanti di traduzione per {channel} sono ora **abilitati**.",
@@ -1715,6 +1765,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Selecteer eerst een taal.",
         "original_message_not_found": "Kon de originele berichttekst niet vinden om te vertalen.",
         "context_menu_no_text": "Kon geen tekst vinden om te vertalen.",
+        "code_not_translated": "Code wordt niet vertaald.",
+        "message_too_long": "Dit bericht is te lang om te vertalen (max. 1900 tekens).",
         "translating_now": "Bezig met vertalen...",
         "channel_admin_required": "Je moet serverbeheerder zijn om kanaalinstellingen te wijzigen.",
         "channel_button_enabled": "Vertaalknoppen voor {channel} zijn nu **ingeschakeld**.",
@@ -1736,6 +1788,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Vui lòng chọn ngôn ngữ trước.",
         "original_message_not_found": "Không tìm thấy nội dung tin nhắn gốc để dịch.",
         "context_menu_no_text": "Không tìm thấy văn bản để dịch.",
+        "code_not_translated": "Mã không được dịch.",
+        "message_too_long": "Tin nhắn này quá dài để dịch (tối đa 1900 ký tự).",
         "translating_now": "Đang dịch...",
         "channel_admin_required": "Bạn phải là quản trị viên máy chủ để thay đổi cài đặt kênh.",
         "channel_button_enabled": "Nút dịch cho {channel} hiện đã **bật**.",
@@ -1757,6 +1811,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Pumili muna ng wika.",
         "original_message_not_found": "Hindi mahanap ang orihinal na text ng mensahe para isalin.",
         "context_menu_no_text": "Walang mahanap na text na maisasalin.",
+        "code_not_translated": "Hindi isinasalin ang code.",
+        "message_too_long": "Masyadong mahaba ang mensaheng ito para isalin (hanggang 1900 character).",
         "translating_now": "Isinasalin...",
         "channel_admin_required": "Kailangan mong maging server administrator para baguhin ang settings ng channel.",
         "channel_button_enabled": "Ang mga translate button para sa {channel} ay **naka-enable** na.",
@@ -1778,6 +1834,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Najpierw wybierz język.",
         "original_message_not_found": "Nie udało się znaleźć oryginalnej treści wiadomości do tłumaczenia.",
         "context_menu_no_text": "Nie znaleziono tekstu do przetłumaczenia.",
+        "code_not_translated": "Kod nie jest tłumaczony.",
+        "message_too_long": "Ta wiadomość jest za długa do przetłumaczenia (maks. 1900 znaków).",
         "translating_now": "Tłumaczenie...",
         "channel_admin_required": "Musisz być administratorem serwera, aby zmieniać ustawienia kanału.",
         "channel_button_enabled": "Przyciski tłumaczenia dla {channel} są teraz **włączone**.",
@@ -1799,6 +1857,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Сначала выберите язык.",
         "original_message_not_found": "Не удалось найти исходный текст сообщения для перевода.",
         "context_menu_no_text": "Не удалось найти текст для перевода.",
+        "code_not_translated": "Код не переводится.",
+        "message_too_long": "Сообщение слишком длинное для перевода (максимум 1900 символов).",
         "translating_now": "Перевод...",
         "channel_admin_required": "Вы должны быть администратором сервера, чтобы менять настройки канала.",
         "channel_button_enabled": "Кнопки перевода для {channel} теперь **включены**.",
@@ -1820,6 +1880,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Спочатку виберіть мову.",
         "original_message_not_found": "Не вдалося знайти оригінальний текст повідомлення для перекладу.",
         "context_menu_no_text": "Не вдалося знайти текст для перекладу.",
+        "code_not_translated": "Код не перекладається.",
+        "message_too_long": "Повідомлення задовге для перекладу (максимум 1900 символів).",
         "translating_now": "Переклад...",
         "channel_admin_required": "Щоб змінювати налаштування каналу, ви маєте бути адміністратором сервера.",
         "channel_button_enabled": "Кнопки перекладу для {channel} тепер **увімкнені**.",
@@ -1841,6 +1903,8 @@ LOCALE_STRINGS = {
         "select_language_first": "يرجى اختيار لغة أولاً.",
         "original_message_not_found": "تعذر العثور على نص الرسالة الأصلي للترجمة.",
         "context_menu_no_text": "تعذر العثور على نص للترجمة.",
+        "code_not_translated": "لا تتم ترجمة الشيفرة البرمجية.",
+        "message_too_long": "هذه الرسالة طويلة جدًا للترجمة (الحد الأقصى 1900 حرف).",
         "translating_now": "جارٍ الترجمة...",
         "channel_admin_required": "يجب أن تكون مسؤول الخادم لتغيير إعدادات القناة.",
         "channel_button_enabled": "أزرار الترجمة في {channel} الآن **مفعلة**.",
@@ -1862,6 +1926,8 @@ LOCALE_STRINGS = {
         "select_language_first": "कृपया पहले एक भाषा चुनें।",
         "original_message_not_found": "अनुवाद के लिए मूल संदेश का पाठ नहीं मिला।",
         "context_menu_no_text": "अनुवाद के लिए कोई पाठ नहीं मिला।",
+        "code_not_translated": "कोड का अनुवाद नहीं किया जाता।",
+        "message_too_long": "यह संदेश अनुवाद के लिए बहुत लंबा है (अधिकतम 1900 वर्ण)।",
         "translating_now": "अनुवाद हो रहा है...",
         "channel_admin_required": "चैनल सेटिंग बदलने के लिए आपको सर्वर एडमिन होना चाहिए।",
         "channel_button_enabled": "{channel} के लिए अनुवाद बटन अब **सक्रिय** हैं।",
@@ -1883,6 +1949,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Lütfen önce bir dil seçin.",
         "original_message_not_found": "Çevrilecek orijinal mesaj metni bulunamadı.",
         "context_menu_no_text": "Çevrilecek metin bulunamadı.",
+        "code_not_translated": "Kod çevrilmez.",
+        "message_too_long": "Bu mesaj çevrilemeyecek kadar uzun (en fazla 1900 karakter).",
         "translating_now": "Çevriliyor...",
         "channel_admin_required": "Kanal ayarlarını değiştirmek için sunucu yöneticisi olmalısınız.",
         "channel_button_enabled": "{channel} için çeviri düğmeleri artık **etkin**.",
@@ -1904,6 +1972,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Silakan pilih bahasa terlebih dahulu.",
         "original_message_not_found": "Tidak dapat menemukan teks pesan asli untuk diterjemahkan.",
         "context_menu_no_text": "Tidak dapat menemukan teks untuk diterjemahkan.",
+        "code_not_translated": "Kode tidak diterjemahkan.",
+        "message_too_long": "Pesan ini terlalu panjang untuk diterjemahkan (maks. 1900 karakter).",
         "translating_now": "Menerjemahkan...",
         "channel_admin_required": "Anda harus menjadi administrator server untuk mengubah pengaturan channel.",
         "channel_button_enabled": "Tombol terjemahan untuk {channel} sekarang **aktif**.",
@@ -1925,6 +1995,8 @@ LOCALE_STRINGS = {
         "select_language_first": "โปรดเลือกภาษาก่อน",
         "original_message_not_found": "ไม่พบข้อความต้นฉบับสำหรับแปล",
         "context_menu_no_text": "ไม่พบข้อความสำหรับแปล",
+        "code_not_translated": "โค้ดจะไม่ถูกแปล",
+        "message_too_long": "ข้อความนี้ยาวเกินกว่าจะแปลได้ (สูงสุด 1900 ตัวอักษร)",
         "translating_now": "กำลังแปล...",
         "channel_admin_required": "คุณต้องเป็นผู้ดูแลเซิร์ฟเวอร์เพื่อเปลี่ยนการตั้งค่าช่อง",
         "channel_button_enabled": "ปุ่มแปลสำหรับ {channel} ตอนนี้ **เปิดใช้งาน** แล้ว",
@@ -1946,6 +2018,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Nejprve vyberte jazyk.",
         "original_message_not_found": "Nepodařilo se najít původní text zprávy k překladu.",
         "context_menu_no_text": "Nepodařilo se najít text k překladu.",
+        "code_not_translated": "Kód se nepřekládá.",
+        "message_too_long": "Tato zpráva je na překlad příliš dlouhá (max. 1900 znaků).",
         "translating_now": "Překládá se...",
         "channel_admin_required": "Pro změnu nastavení kanálu musíte být správcem serveru.",
         "channel_button_enabled": "Překladová tlačítka pro {channel} jsou nyní **povolena**.",
@@ -1967,6 +2041,8 @@ LOCALE_STRINGS = {
         "select_language_first": "Selectați mai întâi o limbă.",
         "original_message_not_found": "Nu s-a putut găsi textul mesajului original pentru traducere.",
         "context_menu_no_text": "Nu s-a putut găsi text de tradus.",
+        "code_not_translated": "Codul nu se traduce.",
+        "message_too_long": "Acest mesaj este prea lung pentru a fi tradus (max. 1900 de caractere).",
         "translating_now": "Se traduce...",
         "channel_admin_required": "Trebuie să fii administrator al serverului pentru a schimba setările canalului.",
         "channel_button_enabled": "Butoanele de traducere pentru {channel} sunt acum **activate**.",
@@ -2598,7 +2674,7 @@ class LanguageSelectView(discord.ui.View):
             )
             
             # Edit the ephemeral message to show the translation as plain text.
-            await interaction.edit_original_response(content=translated_text, view=None)
+            await edit_translation_status(interaction, translated_text, view=None)
             
             log("Language Select", f"translation shown for {interaction.user.id}")
             
@@ -2679,6 +2755,16 @@ class TranslateButtonView(discord.ui.View):
                         "original_message_not_found",
                         "Could not find the original message text to translate.",
                     ),
+                    ephemeral=True,
+                )
+                return
+
+            # The message may have been edited, or the button predates the content filter.
+            skip_reason = get_skip_reason(original_message.content)
+            if skip_reason is not None:
+                await send_response(
+                    interaction,
+                    content=get_skip_reason_message(interaction.locale, skip_reason),
                     ephemeral=True,
                 )
                 return
@@ -2847,8 +2933,9 @@ async def on_disconnect():
 
 @client.event
 async def on_message(message: discord.Message):
-    # Ignore bot messages, empty messages, and emoji-only messages.
-    if message.author.bot or not message.content or is_emoji_only_message(message.content):
+    # Ignore bot messages and messages with nothing worth translating
+    # (code, bot commands, too long, only links/mentions/emoji...).
+    if message.author.bot or get_skip_reason(message.content) is not None:
         return
     
     guild_id = message.guild.id if message.guild else None
@@ -3058,14 +3145,11 @@ async def toggle_translate_button_channel(
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @client.tree.context_menu(name="Translate")
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
-    # Check if the message actually contains any text beyond emoji.
-    if not message.content or is_emoji_only_message(message.content):
+    # Code, bot commands, too long, or no real text: explain instead of translating.
+    skip_reason = get_skip_reason(message.content)
+    if skip_reason is not None:
         await interaction.response.send_message(
-            get_localized_string(
-                interaction.locale,
-                "context_menu_no_text",
-                "Could not find any text to translate.",
-            ),
+            get_skip_reason_message(interaction.locale, skip_reason),
             ephemeral=True,
         )
         return
@@ -3186,7 +3270,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         )
 
         # ephemeral=True ensures ONLY the user who clicked 'Translate' sees this result
-        await send_response(interaction, content=translated_text, ephemeral=True)
+        await send_translation(interaction, translated_text)
         
         # Record successful translation for post-translation cooldown
         record_translation_success(interaction.user.id)
