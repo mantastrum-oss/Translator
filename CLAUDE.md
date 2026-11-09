@@ -19,8 +19,12 @@ Google/DeepL, Supabase, analytics dashboard). Repo: `github.com/mantastrum-oss/T
   forgets to mock a call fails with "Network access is disabled in tests" instead of hitting real services.
   Handler tests must patch `bot.is_translation_blocked` (it queries Supabase).
 - No CI, no Docker for the bot. Deployment is manual (a `translator.zip` of the source is built and uploaded;
-  zip is gitignored). Sibling folders `../TranslatorController 2.0.x` are manual snapshots of past releases and
-  `../TranslatorController DEV` is a dev copy — not part of this repo; don't edit them unless asked.
+  zip is gitignored). Sibling folders `../TranslatorController 2.0.x` are manual snapshots of past releases;
+  `../TranslatorController DEV` is old and unused. Don't edit them.
+- **One folder, two environments:** the owner switches `.env` values between PROD and DEV in this folder.
+  Supabase DEV ref = `ecpkyamwppumrdydfqec`, PROD ref = `kotshdfbgmvfafttaick`. Before running the bot or any
+  script that touches Supabase, check which ref `SUPABASE_URL` contains (never print keys); if PROD, ask first.
+- Supabase MCP (`supabase-dev`, local scope, read-only) is pinned to the DEV project. Never connect it to PROD.
 
 ## Files
 
@@ -109,8 +113,8 @@ Every task happens on its own branch and reaches `main` only through a GitHub Pu
 3. `git rebase origin/main`
 4. `.venv\Scripts\python.exe -m pytest -q` — must pass. Run it as a separate step from the commit and never
    commit if it fails.
-5. Run the bot against the **DEV** bot/Supabase (`../TranslatorController DEV` env), not production, and try
-   the affected flow in Discord when the change touches user-facing behavior.
+5. With `.env` switched to **DEV** (Supabase ref `ecpky…`), run the bot and try the affected flow in Discord
+   when the change touches user-facing behavior (the owner does this; Claude can't use Discord).
 6. `git push -u origin <task-name>`
 7. Open a PR into `main` (`gh pr create`). Under "Files changed", confirm only intended files changed.
 8. The owner merges.
