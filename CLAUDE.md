@@ -15,7 +15,9 @@ Google/DeepL, Supabase, analytics dashboard, Ko-fi). Repo: `github.com/mantastru
 
 - Python 3.14 in `.venv`. Deps in `requirements.txt` (discord.py, aiohttp, deepl, langdetect, diskcache).
 - Tests use `unittest`/pytest with heavy `patch`ing of `bot` module globals. **`import bot` loads the real
-  `.env`**, so any un-mocked Supabase/HTTP call in a test hits the real service (see Gotchas).
+  `.env`**, so root `conftest.py` blocks all non-localhost network connections during tests: a test that
+  forgets to mock a call fails with "Network access is disabled in tests" instead of hitting real services.
+  Handler tests must patch `bot.is_translation_blocked` (it queries Supabase).
 - No CI, no Docker for the bot. Deployment is manual (a `translator.zip` of the source is built and uploaded;
   zip is gitignored). Sibling folders `../TranslatorController 2.0.x` are manual snapshots of past releases and
   `../TranslatorController DEV` is a dev copy — not part of this repo; don't edit them unless asked.
@@ -136,8 +138,7 @@ Every task happens on its own branch and reaches `main` only through a GitHub Pu
 ## Known gotchas / tech debt (verify before relying on)
 
 - `is_translation_blocked` returns **True when not on Supabase** → with `STORAGE_BACKEND=json` every
-  translation is blocked. Tests that don't patch it make real Supabase calls (one test,
-  `test_post_translation_cooldown_blocks_immediate_retry`, failed this way on 2026-11-09).
+  translation is blocked.
 - Quota update is read-modify-write over REST (not atomic) → concurrent translations can undercount.
 - Quota is checked twice per request (handler + `translate_text_async`); `get_monthly_limit_message`
   "80"/"90" warnings are never produced by `check_user_quota` (dead code path).

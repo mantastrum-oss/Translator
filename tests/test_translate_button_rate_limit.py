@@ -125,7 +125,6 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
     async def test_post_translation_cooldown_blocks_immediate_retry(self):
         """After successful translation, user must wait 3+ seconds before next translation."""
         user_id = 5005
-        bot.user_languages[user_id] = "en"
 
         class FakeResponse:
             def __init__(self):
@@ -162,10 +161,12 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
         view = bot.TranslateButtonView()
         button_item = next(child for child in view.children if getattr(child, "custom_id", "") == "translate_button")
 
-        with patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
+        with patch.dict(bot.user_languages, {user_id: "en"}), \
+             patch("bot.is_translation_blocked", new_callable=AsyncMock, return_value=False), \
+             patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
              patch("bot.send_response", new_callable=AsyncMock) as mock_send_response, \
-               patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
-               patch("bot.emit_translation_analytics_event") as analytics:
+             patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
+             patch("bot.emit_translation_analytics_event") as analytics:
             
             # First translation allowed
             await bot.TranslateButtonView.translate_button(view, make_button_interaction(1), button_item)
@@ -240,6 +241,7 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.dict(bot.user_languages, {424242: "en"}), \
+             patch("bot.is_translation_blocked", new_callable=AsyncMock, return_value=False), \
              patch("bot.translate_text_async", new_callable=AsyncMock, return_value="translated"), \
              patch("bot.check_translation_quota", new_callable=AsyncMock, return_value=(True, None)), \
              patch("bot.emit_translation_analytics_event"):
