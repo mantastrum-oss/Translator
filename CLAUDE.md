@@ -33,7 +33,7 @@ Google/DeepL, Supabase, analytics dashboard). Repo: `github.com/mantastrum-oss/T
 | `bot.py` (~3300 lines) | Everything Discord: client, storage, rate limits, analytics/heartbeat workers, localization tables, views, commands, event handlers, entrypoint. |
 | `translation_service.py` | `ResilientTranslator`: length check (1900), per-user 3s limiter, diskcache (7d, `./translation_cache`), provider chain. |
 | `google_translation.py` | Google Cloud Translation v2 REST client (API key). |
-| `user_quota.py` | Per-user monthly character quota in Supabase `user_monthly_usage`; 30s in-memory cache; fail-closed. |
+| `user_quota.py` | Per-user monthly character quota in Supabase `user_monthly_usage`; 30s in-memory cache; fail-closed. Enforcement is **off** unless `USER_QUOTA_ENFORCED=true` (usage is still recorded). |
 | `console_log.py` | `log(tag, msg)` — unified `HH:MM:SS LEVEL Tag msg` console output, Europe/Helsinki time. Level is auto-picked from words ("failed"/"error" → ERROR, "denied"/"timeout" → WARN). |
 | `schema_user_quota.sql` | Supabase DDL (run manually in the Supabase SQL editor). |
 | `README.md` | User-facing feature list + **changelog** (update it for user-visible changes, newest version on top). |
@@ -49,7 +49,8 @@ Entry points (all in `bot.py`): `TranslateButtonView.translate_button` (button u
 2. Click → fetch referenced original message → `check_translate_button_rate_limit` (2 taps/10s + 3s
    post-success cooldown, longer for >500 chars) → `is_translation_blocked` (author of the original message
    in Supabase `blocked_users`; **fails closed**) → if user has no language, show `LanguageSelectView`.
-3. `check_translation_quota` → `user_quota.check_user_quota` (fail-closed on Supabase errors).
+3. `check_translation_quota` → `user_quota.check_user_quota`. With `USER_QUOTA_ENFORCED` off (default until Stripe)
+   it allows everything without a Supabase call; when on, it is fail-closed on Supabase errors.
 4. Button is swapped to a disabled "Translating..." state (`translation_button_in_progress`), then restored.
 5. `translate_text_async` → emoji extraction/restoration → quota check again → `ResilientTranslator.translate`:
    **CTranslate2/Madlad (self-hosted, `CTRANSLATE_URL`) → Google Cloud → DeepL** → localized error string.
@@ -69,8 +70,10 @@ the prefix. Keep that convention or change it everywhere at once.
   `guild_settings`, `channel_overrides` are loaded into memory (`user_languages`, `settings` globals); writes go
   to Supabase and fall back to JSON on error.
 - Supabase tables: `user_languages`, `guild_settings`, `channel_overrides`, `blocked_users`, `bot_logs`,
-  `user_monthly_usage`. (Supabase may still contain a leftover `donations` table + `apply_donation` RPC
-  from the removed Ko-fi integration; unused by code.)
+  `user_monthly_usage`. The same Supabase DB also holds the dashboard's tables (`translation_events`,
+  `blocked_guilds`, `blocked_channels`, `guild_monthly_usage`, `reserve_translation_characters()`; PROD also
+  `alembic_version`) — the bot doesn't use them. DEV and PROD schemas matched on 2026-11-09 except
+  `user_monthly_usage.monthly_limit` default (DEV 0, PROD 50000) and `alembic_version`. No `donations` table left.
 - Analytics/heartbeat → the **TranslatorDahsboard** project (`../TranslatorDahsboard`, FastAPI + React +
   Postgres): `POST {ANALYTICS_COLLECTOR_URL}/v1/events/translation` and `/api/bot/heartbeat` every 30s,
   header `X-API-Key`. Message text is never sent — only metadata. The dashboard also manages `blocked_users`.
@@ -84,7 +87,8 @@ the prefix. Keep that convention or change it everywhere at once.
 `DISCORD_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APP_ID`, `STORAGE_BACKEND`, `STORAGE_IMPORT_JSON`,
 `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_TRANSLATE_API_KEY`, `DEEPL_API_KEY`, `CTRANSLATE_URL`,
 `CTRANSLATE_API_KEY`, `CTRANSLATE_TIMEOUT_SECONDS`, `ANALYTICS_COLLECTOR_URL`, `ANALYTICS_API_KEY`,
-`USER_MONTHLY_CHARACTER_LIMIT` (default 50000).
+`USER_MONTHLY_CHARACTER_LIMIT` (default 50000), `USER_QUOTA_ENFORCED` (default false; set true only once paid
+plans exist — existing PROD rows store `monthly_limit=50000`, which then applies again).
 
 ## Localization
 

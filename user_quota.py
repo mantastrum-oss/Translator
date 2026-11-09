@@ -23,6 +23,11 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 DEFAULT_USER_MONTHLY_CHARACTER_LIMIT = int(
     os.getenv("USER_MONTHLY_CHARACTER_LIMIT", "50000")
 )
+# Monthly limits are off until paid plans (Stripe) exist. While off, every
+# request is allowed without a Supabase lookup; usage is still recorded.
+USER_QUOTA_ENFORCED = os.getenv("USER_QUOTA_ENFORCED", "false").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 # Quota enforcement timeouts
 USER_QUOTA_TIMEOUT_SECONDS = 1.5
@@ -246,9 +251,12 @@ def check_user_quota(user_id: int, char_count: int) -> Tuple[bool, Optional[str]
         - allowed=True, error_message=None: proceed with translation
         - allowed=False, error_message=str: reject with message
     """
+    if not USER_QUOTA_ENFORCED:
+        return True, None
+
     user_id_str = str(user_id)
     month = _get_month_key()
-    
+
     # Check cache first
     if _is_cache_valid(user_id_str):
         quota = _quota_cache.get(user_id_str)

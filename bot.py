@@ -44,6 +44,7 @@ from console_log import log, setup_logging
 setup_logging()
 
 from translation_service import ResilientTranslator
+import user_quota
 from user_quota import check_user_quota, update_user_quota_async
 
 DetectorFactory.seed = 0
@@ -2853,6 +2854,10 @@ class TranslateButtonView(discord.ui.View):
 @client.event
 async def on_ready():
     log("Bot", f"logged in as {client.user}")
+    if user_quota.USER_QUOTA_ENFORCED:
+        log("Quota", f"monthly limits ON (default {user_quota.DEFAULT_USER_MONTHLY_CHARACTER_LIMIT:,} chars)")
+    else:
+        log("Quota", "monthly limits OFF (usage is still counted)")
     await publish_bot_heartbeat("online")
 
 

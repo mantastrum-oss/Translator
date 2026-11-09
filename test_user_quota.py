@@ -33,6 +33,13 @@ def clear_quota_cache():
     _quota_cache_timestamp.clear()
 
 
+@pytest.fixture
+def quota_enforced():
+    """Turn monthly limit enforcement on (it is off by default until Stripe)."""
+    with patch('user_quota.USER_QUOTA_ENFORCED', True):
+        yield
+
+
 class TestQuotaHelpers:
     """Test utility functions."""
     
@@ -50,6 +57,7 @@ class TestQuotaHelpers:
         assert 1 <= month_num <= 12
 
 
+@pytest.mark.usefixtures("quota_enforced")
 class TestQuotaChecks:
     """Test quota enforcement logic."""
     
@@ -102,6 +110,7 @@ class TestQuotaChecks:
             assert "temporarily unavailable" in error.lower()
 
 
+@pytest.mark.usefixtures("quota_enforced")
 class TestQuotaCaching:
     """Test in-memory quota cache."""
     
@@ -125,6 +134,27 @@ class TestQuotaCaching:
         # This is tested indirectly; after _update_user_quota_sync,
         # the cache entry should be removed
         pass  # Covered by integration tests
+
+
+class TestQuotaNotEnforced:
+    """While enforcement is off, limits and lookup failures never block users."""
+
+    def test_over_limit_user_is_allowed_without_lookup(self, clear_quota_cache):
+        with patch('user_quota.USER_QUOTA_ENFORCED', False),              patch('user_quota._query_user_quota_sync') as mock_query:
+            mock_query.return_value = {"monthly_limit": 50000, "used_chars": 50000}
+
+            allowed, error = check_user_quota(user_id=201, char_count=1000)
+
+            assert allowed is True
+            assert error is None
+            mock_query.assert_not_called()
+
+    def test_lookup_failure_does_not_block(self, clear_quota_cache):
+        with patch('user_quota.USER_QUOTA_ENFORCED', False),              patch('user_quota._query_user_quota_sync', return_value=None):
+            allowed, error = check_user_quota(user_id=202, char_count=100)
+
+            assert allowed is True
+            assert error is None
 
 
 class TestQuotaUpdates:
@@ -256,6 +286,7 @@ class TestAsyncQuotaUpdate:
             assert isinstance(result, bool)
 
 
+@pytest.mark.usefixtures("quota_enforced")
 class TestFailClosedBehavior:
     """Test fail-closed semantics."""
     
@@ -308,6 +339,7 @@ class TestGuildQuotaPreservation:
 
 
 # Integration-style tests (require real Supabase or mocking)
+@pytest.mark.usefixtures("quota_enforced")
 class TestIntegration:
     """Integration tests (mocked)."""
     
