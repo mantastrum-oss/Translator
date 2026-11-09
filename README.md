@@ -62,6 +62,11 @@ Notes:
 
 User-facing updates since version 1.0.
 
+### v2.1.3 - 2026-11-09
+
+- Removed the monthly translation character limit: translations are no longer blocked after a set number of characters per month.
+- Translations are no longer refused with "Quota service temporarily unavailable" when the usage database responds slowly.
+
 ### v2.1.2 - 2026-10-08
 
 - Added a static "Translating..." label on the translate button, and the button is disabled while a translation is in progress to prevent repeated clicks.
