@@ -1,79 +1,49 @@
-# Privacy Policy
+# Translator Privacy Notice
 
-Effective date: 2026-07-27
+Last updated: 13 November 2026
 
-This Privacy Policy explains what data the Translator Discord Bot processes and stores.
+This is a copy of [https://montezproductions.lt/translator/privacy](https://montezproductions.lt/translator/privacy). If the two differ, the version on the website applies.
 
-## 1. Data the Bot Stores
+This notice explains how Translator, our Discord bot, handles personal data. It adds to our [Privacy Policy](https://montezproductions.lt/privacy), which covers who we are, purchases, your rights and how to contact us.
 
-Based on the current implementation, the bot stores the following data locally in its state file:
+## 1. What the bot stores
 
-- Discord user IDs linked to each user's selected target language;
-- Discord guild IDs and channel IDs used for translate-button configuration; and
-- server and channel on or off settings for the translate-button feature.
+| Data | Why | Legal basis (GDPR) |
+| --- | --- | --- |
+| Your Discord user ID and your saved target language | To translate into the language you chose | Performance of the service you request (Art. 6(1)(b)) |
+| Server (guild) and channel IDs, and their translate-button settings | To follow the server administrators’ settings | Legitimate interest in running the bot (Art. 6(1)(f)) |
+| Character usage per user and per server for each month, pack balances and expiry dates | To apply the free allowance and paid packs | Performance of contract (Art. 6(1)(b)) |
+| Event and error logs: time, event or error type, user, server and channel IDs, target language, character count and result. No message text. | To keep the bot reliable, fix errors, prevent abuse and plan capacity | Legitimate interest (Art. 6(1)(f)) |
 
-The bot does not currently store translated message history or full message content in its local state file.
+Pack purchases are described in our [Privacy Policy](https://montezproductions.lt/privacy).
 
-## 2. Data the Bot Processes
+## 2. Message text
 
-When a user requests a translation through the message button, context menu, reaction flow, or language-selection follow-up flow, the bot processes:
+The bot reads the text of a message only when someone asks for it to be translated, with the translate button or from the message menu. The text is sent to the translation engine, and the translation is shown in Discord only to the person who asked.
 
-- the text content of the target Discord message;
-- the requesting user's Discord ID to look up that user's saved language preference; and
-- Discord locale information when choosing localized interface text.
+We do not store the original text or the translation, and neither is written to our logs or database. Messages stay in Discord. The bot also uses your Discord interface language, which Discord sends with each request, to show its own messages in your language.
 
-The bot also receives standard Discord event metadata needed to operate inside Discord.
+## 3. Translation engines and other providers
 
-## 3. Third-Party Processing
+- **Translation engines**: translations are produced by the MADLAD translation model running on our own server. If it cannot translate a message, the text is sent to **Google Cloud Translation** as a backup.
+- **Discord**: the platform the bot runs on.
+- **Supabase**: our database for settings, usage, pack balances and logs.
 
-To provide translations, the bot sends message text to a third-party translation service through the `deep-translator` package and its Google translation integration.
+Some of these providers may process data outside the European Economic Area, using the safeguards described in our [Privacy Policy](https://montezproductions.lt/privacy).
 
-That means message content selected for translation may leave Discord and be processed by external services that are not operated by this repository's maintainer.
+## 4. How long we keep data
 
-Use of those services is subject to their own terms, privacy practices, and availability.
+- Language and server settings: until you change them, the bot is removed from the server, or you ask us to delete them.
+- Usage and pack data: as long as needed to provide the service. Monthly usage totals are kept for up to 24 months.
+- Event and error logs: 2 months, then deleted.
 
-## 4. Logs and Error Data
+## 5. Your choices
 
-The current implementation writes operational logs to standard output. Those logs may include limited identifiers and operational details such as:
+- If you do not want a message’s text processed, do not ask the bot to translate it.
+- You can change your language at any time with `/language`.
+- Server administrators can turn translate buttons off for a server or channel, or remove the bot.
+- To see or delete your data, follow your rights in our [Privacy Policy](https://montezproductions.lt/privacy) and include your Discord user ID.
 
-- Discord user identifiers;
-- interaction identifiers;
-- server names or IDs during command sync; and
-- exception messages and stack traces when errors occur.
+## 6. Children
 
-The current implementation does not intentionally log full message content during normal translation handling.
-
-## 5. Legal Bases and User Choices
-
-If you do not want your message content processed for translation, do not trigger the bot's translation features.
-
-Users can change their saved target language by using the bot's language command again. Server administrators can disable automatic translate buttons for a server or channel.
-
-## 6. Data Retention
-
-Stored preferences and settings remain in the bot's local state file until they are changed, deleted, or the bot operator resets or removes the file.
-
-Operational logs, if collected by the hosting environment, may persist according to that environment's log retention settings.
-
-## 7. Data Sharing
-
-The bot does not sell personal data. Data is shared only as needed to:
-
-- provide Discord bot functionality through Discord; and
-- obtain translations from the external translation provider described above.
-
-## 8. Security
-
-The bot stores its state in a local JSON file and relies on the security of the host environment, Discord, and third-party services. No method of storage or transmission is completely secure.
-
-## 9. Children's Privacy
-
-The bot is not directed to children. Use of the bot remains subject to Discord's own age and account requirements.
-
-## 10. Changes to This Policy
-
-This Privacy Policy may be updated from time to time. Continued use of the bot after an updated policy is published indicates acceptance of the revised policy.
-
-## 11. Contact
-
-Questions or requests about privacy should be directed to the bot operator or repository maintainer.
+Translator is not aimed at children under the minimum age required by Discord in their country.
