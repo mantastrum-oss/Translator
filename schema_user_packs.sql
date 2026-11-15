@@ -21,6 +21,10 @@ create index if not exists user_packs_active_idx
   on public.user_packs (user_id, expires_at)
   where chars_left > 0 and refunded_at is null;
 alter table public.user_packs enable row level security;  -- no policies: service role only
+-- Newer Supabase projects don't grant new tables to API roles automatically (PROD returned
+-- 403 without this). Grant explicitly: the bot (service_role) only, never anon/authenticated.
+revoke all on public.user_packs from anon, authenticated;
+grant select, insert, update on public.user_packs to service_role;
 
 -- 2) Monthly usage: how many of this month's chars were paid from packs
 --    used_chars stays = everything translated this month (stats keep working);
