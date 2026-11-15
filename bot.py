@@ -45,6 +45,7 @@ setup_logging()
 
 from translation_service import ResilientTranslator
 import user_quota
+import stripe_payments
 from user_quota import QuotaDecision, check_user_quota_async, record_user_usage_async
 from content_filter import get_skip_reason, protect_segments, restore_segments, split_for_discord
 
@@ -125,6 +126,7 @@ class TranslatorBot(discord.Client):
         await initialize_storage()
         self.add_view(TranslateButtonView())
         start_analytics_worker_if_configured()
+        start_stripe_poll_worker()
         try:
             await self.tree.set_translator(BotCommandTranslator())
             synced_commands = await self.tree.sync()
@@ -136,6 +138,7 @@ class TranslatorBot(discord.Client):
         await publish_bot_heartbeat("shutting_down")
         await shutdown_heartbeat_worker()
         await shutdown_analytics_worker()
+        await shutdown_stripe_poll_worker()
         await super().close()
 
 client = TranslatorBot()
@@ -1058,6 +1061,54 @@ def start_heartbeat_worker() -> None:
     if heartbeat_worker_task is None or heartbeat_worker_task.done():
         heartbeat_worker_task = asyncio.create_task(_heartbeat_worker(), name="bot-heartbeat")
         log("Heartbeat", f"worker started")
+
+
+stripe_poll_worker_task: asyncio.Task | None = None
+
+
+async def stripe_poll_step(since_ts: int) -> int:
+    """One poll: grant paid Stripe sessions as packs. Returns the next cursor."""
+    try:
+        next_since, granted = await asyncio.to_thread(stripe_payments.poll_once_sync, since_ts)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log("Payments", f"poll failed: {exc}")
+        return since_ts
+    for row in granted:
+        log("Payments", f"granted {row['pack_code']} pack ({row['chars_total']:,} chars) to user {row['user_id']}")
+    return next_since
+
+
+async def _stripe_poll_worker() -> None:
+    since_ts = stripe_payments.initial_since_ts()
+    while True:
+        since_ts = await stripe_poll_step(since_ts)
+        await asyncio.sleep(stripe_payments.POLL_INTERVAL_SECONDS)
+
+
+def start_stripe_poll_worker() -> None:
+    global stripe_poll_worker_task
+    if not stripe_payments.stripe_is_configured():
+        log("Payments", "disabled (missing STRIPE_API_KEY / STRIPE_PRICE_SMALL / STRIPE_PRICE_LARGE)")
+        return
+    if stripe_poll_worker_task is None or stripe_poll_worker_task.done():
+        stripe_poll_worker_task = asyncio.create_task(_stripe_poll_worker(), name="stripe-poll")
+        mode = "TEST" if stripe_payments.stripe_is_test_mode() else "LIVE"
+        log("Payments", f"Stripe {mode} poller started (every {stripe_payments.POLL_INTERVAL_SECONDS}s)")
+
+
+async def shutdown_stripe_poll_worker() -> None:
+    global stripe_poll_worker_task
+    if stripe_poll_worker_task is None:
+        return
+    stripe_poll_worker_task.cancel()
+    try:
+        await stripe_poll_worker_task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        stripe_poll_worker_task = None
 
 
 async def shutdown_heartbeat_worker() -> None:

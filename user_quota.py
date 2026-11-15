@@ -200,3 +200,25 @@ def record_user_usage_sync(user_id: int | str, char_count: int) -> bool:
 
 async def record_user_usage_async(user_id: int | str, char_count: int) -> bool:
     return await asyncio.to_thread(record_user_usage_sync, user_id, char_count)
+
+
+def grant_pack_sync(row: dict) -> bool:
+    """Insert a purchased pack. True = added, False = already granted (same Stripe session).
+
+    Raises on failure so the caller can retry later.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Supabase not configured")
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/user_packs?on_conflict=stripe_session_id",
+        data=json.dumps(row).encode("utf-8"),
+        headers={
+            **_supabase_headers(),
+            "Prefer": "resolution=ignore-duplicates,return=representation",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=USER_QUOTA_TIMEOUT_SECONDS * 2) as response:
+        inserted = json.loads(response.read().decode("utf-8") or "[]")
+    invalidate_user_quota_cache(row["user_id"])
+    return bool(inserted)
