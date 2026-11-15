@@ -1,6 +1,6 @@
 # Translator Terms
 
-Last updated: 13 November 2026
+Last updated: 15 November 2026
 
 This is a copy of [https://montezproductions.lt/translator/terms](https://montezproductions.lt/translator/terms). If the two differ, the version on the website applies.
 
@@ -21,10 +21,14 @@ Server administrators decide whether translate buttons appear under messages, fo
 
 ## 3. Free allowance and paid packs
 
-- Every user gets a free monthly character allowance, as shown on the [pricing page](https://montezproductions.lt/translator#pricing). It resets each calendar month (UTC). Unused free characters do not carry over.
-- You can buy one-time character packs. Current packs and prices are listed on the [pricing page](https://montezproductions.lt/translator#pricing).
-- A pack is valid for 30 days from the moment of purchase. Characters not used within 30 days expire.
-- Personal packs belong to the Discord account that bought them and cannot be transferred. Server packs apply to one Discord server and are shared by its members.
+- Every user gets a free monthly character allowance, as shown on the [pricing page](https://montezproductions.lt/translator#pricing). It resets on the 1st day of each month (UTC). Unused free characters do not carry over.
+- You can buy personal character packs in Discord with the `/premium` command. Current packs and prices are listed on the [pricing page](https://montezproductions.lt/translator#pricing).
+- Each pack is a one-time payment processed by Stripe. There is no subscription and nothing renews automatically. Prices include any applicable taxes.
+- A pack is valid for 60 days from the moment of its purchase. Characters not used within those 60 days expire and are not carried over.
+- You can hold several packs at the same time. Each pack is valid for 60 days from its own purchase.
+- Your free monthly characters are used first. After that, characters are taken from the pack that expires soonest.
+- Packs belong to the Discord account that bought them and cannot be transferred.
+- Server packs, shared by all members of one Discord server, are not offered at the moment. If we introduce them later, they will be listed on the pricing page and described in these terms.
 - Characters are counted on the original text that you translate. A translation that fails is not counted.
 
 ## 4. Translation quality
