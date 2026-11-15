@@ -87,8 +87,7 @@ class ClickOnCodeTests(unittest.IsolatedAsyncioTestCase):
 class TranslateTextAsyncProtectionTests(unittest.IsolatedAsyncioTestCase):
     async def translate(self, text: str, provider_result):
         provider = AsyncMock(side_effect=provider_result)
-        with patch.object(bot, "check_user_quota", return_value=(True, None)), \
-             patch.object(bot, "update_user_quota_async", new_callable=AsyncMock, return_value=True), \
+        with patch.object(bot, "record_user_usage_async", new_callable=AsyncMock, return_value=True), \
              patch.object(bot.resilient_translator, "translate", provider):
             result = await bot.translate_text_async(text, "lt", 1, "lt")
         return result, provider.await_args.kwargs["text"]

@@ -45,7 +45,7 @@ setup_logging()
 
 from translation_service import ResilientTranslator
 import user_quota
-from user_quota import check_user_quota, update_user_quota_async
+from user_quota import QuotaDecision, check_user_quota_async, record_user_usage_async
 from content_filter import get_skip_reason, protect_segments, restore_segments, split_for_discord
 
 DetectorFactory.seed = 0
@@ -846,12 +846,10 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
     but with added resilience through fallback providers (Google → DeepL)
     and persistent caching.
     
-    Flow:
-    1. Check per-user monthly quota (BEFORE any translation work)
-    2. If denied, return quota message without calling providers
-    3. If allowed, call resilient translator
-    4. On success, update user quota
-    
+    The character balance is checked by the interaction handlers
+    (check_translation_quota) before this is called; on success the
+    characters are deducted here (free allowance first, then packs).
+
     Args:
         text: Text to translate
         target_lang: Target language code
@@ -868,18 +866,8 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
     # Swap code, links, mentions, custom emoji and emoji for {n} markers so the
     # translator never touches them (and they don't count toward quota).
     text_without_emojis, protected_segments = protect_segments(text)
-    
-    # STEP 1: Check per-user monthly quota (FAIL-CLOSED)
-    # This happens BEFORE any translation provider is called
     char_count = len(text_without_emojis)
-    quota_allowed, quota_error = check_user_quota(user_id, char_count)
-    
-    if not quota_allowed:
-        # User is over quota or lookup failed; reject without translation
-        log("Quota", f"user {user_id} denied: {quota_error}")
-        return quota_error
-    
-    # STEP 2: Use resilient translator (quota is confirmed available)
+
     try:
         translated = await resilient_translator.translate(
             text=text_without_emojis,
@@ -891,12 +879,10 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
         # Check if translation was successful (not an error message from fallback chain)
         # Error messages from the resilient translator start with ⚠️ or ⏳
         if not translated.startswith("⚠️") and not translated.startswith("⏳"):
-            # STEP 3: Translation succeeded; update user quota
-            # Only successful translations count toward quota
-            update_success = await update_user_quota_async(user_id, char_count)
-            if not update_success:
-                # Quota update failed; log but don't block the translation
-                log("Quota", f"failed to update quota for user {user_id}")
+            # Only successful translations are deducted (free allowance first, then packs)
+            if not await record_user_usage_async(user_id, char_count):
+                # Recording failed; log but don't block the translation
+                log("Quota", f"failed to record usage for user {user_id}")
         
         # Put protected parts back (skip for error strings)
         if translated.startswith("⚠️") or translated.startswith("⏳"):
@@ -950,29 +936,48 @@ def analytics_is_enabled() -> bool:
     return bool(ANALYTICS_COLLECTOR_URL and ANALYTICS_API_KEY)
 
 
-def get_monthly_limit_message(warning: str | None) -> str | None:
-    if warning == "80":
-        return "You've reached 80% of the free monthly limit."
-    if warning == "90":
-        return "You've reached 90% of the free monthly limit. You won't be able to use Translator soon."
-    if warning in {"limit", "error"}:
-        return "The monthly translation limit has been reached."
-    return None
+def billable_char_count(text: str | None) -> int:
+    """Characters charged for translating text: same count translate_text_async deducts
+    (code, links, mentions, emoji etc. are protected and not counted)."""
+    if not text:
+        return 0
+    protected_text, _segments = protect_segments(normalize_discord_emoji_markdown(text))
+    return len(protected_text)
 
 
-def format_quota_error_message(quota_warning: str | None) -> str | None:
-    if quota_warning is None:
-        return None
-    if quota_warning in {"80", "90", "limit", "error"}:
-        return get_monthly_limit_message(quota_warning)
-    return quota_warning
-
-
-async def check_translation_quota(user_id: int | None, guild_id: int | None, char_count: int) -> tuple[bool, str | None]:
-    """Enforce the per-user monthly quota. There is no guild-level cap."""
+async def check_translation_quota(
+    user_id: int | None, guild_id: int | None, char_count: int
+) -> tuple[bool, QuotaDecision | None]:
+    """Check the user's character balance (free allowance + packs) before translating.
+    There is no guild-level cap. Returns (allowed, decision); decision explains a denial."""
     if user_id is None:
         return True, None
-    return check_user_quota(user_id, char_count)
+    decision = await check_user_quota_async(user_id, char_count)
+    if not decision.allowed:
+        log("Quota", f"user {user_id} denied: {decision.reason} (needs {decision.needed}, has {decision.available})")
+    return decision.allowed, decision
+
+
+def format_quota_denial(locale, decision: QuotaDecision | None) -> str:
+    """Localized message for a denied translation."""
+    reason = getattr(decision, "reason", None)
+    if reason == user_quota.REASON_UNAVAILABLE or decision is None:
+        return get_localized_string(
+            locale, "quota_unavailable",
+            "⚠️ Couldn't check your character balance. Please try again in a moment.",
+        )
+    reset = f"<t:{user_quota.next_free_reset_timestamp()}:R>"
+    if reason == user_quota.REASON_NOT_ENOUGH:
+        return get_localized_string(
+            locale, "quota_not_enough",
+            "📊 This message has {needed} characters, but you have {available} left. "
+            "Free characters renew {reset}. Need more now? Use `/premium`.",
+        ).format(needed=f"{decision.needed:,}", available=f"{decision.available:,}", reset=reset)
+    return get_localized_string(
+        locale, "quota_limit_reached",
+        "📊 You've used all your characters. Free characters renew {reset}. "
+        "Need more now? Use `/premium`.",
+    ).format(reset=reset)
 
 
 def build_bot_heartbeat_payload(status: str, guild_count: int) -> dict:
@@ -1444,6 +1449,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Translate buttons are now **disabled** in this server.",
         "admin_required": "You must be a server administrator to change this setting.",
         "server_only": "This command can only be used in a server.",
+        "quota_limit_reached": "📊 You've used all your characters. Free characters renew {reset}. Need more now? Use `/premium`.",
+        "quota_not_enough": "📊 This message has {needed} characters, but you have {available} left. Free characters renew {reset}. Need more now? Use `/premium`.",
+        "quota_unavailable": "⚠️ Couldn't check your character balance. Please try again in a moment.",
     },
     "en-GB": {
         "no_language_set": "🌐 **Language Not Set**",
@@ -1471,6 +1479,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Translate buttons are now **disabled** in this server.",
         "admin_required": "You must be a server administrator to change this setting.",
         "server_only": "This command can only be used in a server.",
+        "quota_limit_reached": "📊 You've used all your characters. Free characters renew {reset}. Need more now? Use `/premium`.",
+        "quota_not_enough": "📊 This message has {needed} characters, but you have {available} left. Free characters renew {reset}. Need more now? Use `/premium`.",
+        "quota_unavailable": "⚠️ Couldn't check your character balance. Please try again in a moment.",
     },
     "lt": {
         "no_language_set": "🌐 **Kalba Nenustatyta**",
@@ -1498,6 +1509,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Vertimo mygtukai dabar **išjungti** šiame serveryje.",
         "admin_required": "Turite būti serverio administratorius, kad pakeistumėte šį nustatymą.",
         "server_only": "Šią komandą galima naudoti tik serveryje.",
+        "quota_limit_reached": "📊 Išnaudojote visus simbolius. Nemokami simboliai atsinaujins {reset}. Reikia daugiau dabar? Naudokite `/premium`.",
+        "quota_not_enough": "📊 Šioje žinutėje yra {needed} simbolių, o jums liko {available}. Nemokami simboliai atsinaujins {reset}. Reikia daugiau dabar? Naudokite `/premium`.",
+        "quota_unavailable": "⚠️ Nepavyko patikrinti simbolių likučio. Pabandykite po akimirkos.",
     },
     "de": {
         "no_language_set": "🌐 **Sprache nicht festgelegt**",
@@ -1525,6 +1539,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Übersetzungsschaltflächen sind jetzt **deaktiviert** auf diesem Server.",
         "admin_required": "Du musst ein Serveradministrator sein, um diese Einstellung zu ändern.",
         "server_only": "Dieser Befehl kann nur auf einem Server verwendet werden.",
+        "quota_limit_reached": "📊 Du hast alle deine Zeichen verbraucht. Kostenlose Zeichen werden {reset} erneuert. Brauchst du jetzt mehr? Nutze `/premium`.",
+        "quota_not_enough": "📊 Diese Nachricht hat {needed} Zeichen, du hast aber nur noch {available}. Kostenlose Zeichen werden {reset} erneuert. Brauchst du jetzt mehr? Nutze `/premium`.",
+        "quota_unavailable": "⚠️ Dein Zeichenguthaben konnte nicht geprüft werden. Versuch es gleich noch einmal.",
     },
     "es-ES": {
         "no_language_set": "🌐 **Idioma No Configurado**",
@@ -1552,6 +1569,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Los botones de traducción están **deshabilitados** en este servidor.",
         "admin_required": "Debes ser administrador del servidor para cambiar esta configuración.",
         "server_only": "Este comando solo puede utilizarse en un servidor.",
+        "quota_limit_reached": "📊 Has usado todos tus caracteres. Los caracteres gratuitos se renuevan {reset}. ¿Necesitas más ahora? Usa `/premium`.",
+        "quota_not_enough": "📊 Este mensaje tiene {needed} caracteres, pero solo te quedan {available}. Los caracteres gratuitos se renuevan {reset}. ¿Necesitas más ahora? Usa `/premium`.",
+        "quota_unavailable": "⚠️ No se pudo comprobar tu saldo de caracteres. Inténtalo de nuevo en un momento.",
     },
     "fr": {
         "no_language_set": "🌐 **Langue Non Définie**",
@@ -1579,6 +1599,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Les boutons de traduction sont maintenant **désactivés** sur ce serveur.",
         "admin_required": "Vous devez être administrateur du serveur pour modifier ce paramètre.",
         "server_only": "Cette commande ne peut être utilisée que sur un serveur.",
+        "quota_limit_reached": "📊 Vous avez utilisé tous vos caractères. Les caractères gratuits se renouvellent {reset}. Besoin de plus maintenant ? Utilisez `/premium`.",
+        "quota_not_enough": "📊 Ce message contient {needed} caractères, mais il ne vous en reste que {available}. Les caractères gratuits se renouvellent {reset}. Besoin de plus maintenant ? Utilisez `/premium`.",
+        "quota_unavailable": "⚠️ Impossible de vérifier votre solde de caractères. Réessayez dans un instant.",
     },
     "pt-BR": {
         "no_language_set": "🌐 **Idioma Não Definido**",
@@ -1606,6 +1629,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Os botões de tradução estão **desativados** neste servidor.",
         "admin_required": "Você deve ser um administrador do servidor para alterar essa configuração.",
         "server_only": "Este comando só pode ser usado em um servidor.",
+        "quota_limit_reached": "📊 Você usou todos os seus caracteres. Os caracteres gratuitos são renovados {reset}. Precisa de mais agora? Use `/premium`.",
+        "quota_not_enough": "📊 Esta mensagem tem {needed} caracteres, mas você só tem {available}. Os caracteres gratuitos são renovados {reset}. Precisa de mais agora? Use `/premium`.",
+        "quota_unavailable": "⚠️ Não foi possível verificar seu saldo de caracteres. Tente novamente em instantes.",
     },
     "sv-SE": {
         "no_language_set": "🌐 **Språk Inte Inställt**",
@@ -1633,6 +1659,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Översättningsknappar är nu **inaktiverade** på denna server.",
         "admin_required": "Du måste vara serveradministratör för att ändra denna inställning.",
         "server_only": "Det här kommandot kan bara användas på en server.",
+        "quota_limit_reached": "📊 Du har använt alla dina tecken. Gratistecken förnyas {reset}. Behöver du fler nu? Använd `/premium`.",
+        "quota_not_enough": "📊 Det här meddelandet har {needed} tecken, men du har bara {available} kvar. Gratistecken förnyas {reset}. Behöver du fler nu? Använd `/premium`.",
+        "quota_unavailable": "⚠️ Det gick inte att kontrollera ditt teckensaldo. Försök igen om en stund.",
     },
     "ja": {
         "no_language_set": "🌐 **言語が設定されていません**",
@@ -1660,6 +1689,9 @@ LOCALE_STRINGS = {
         "button_disabled": "翻訳ボタンはこのサーバーで**無効**になりました。",
         "admin_required": "この設定を変更するにはサーバー管理者である必要があります。",
         "server_only": "このコマンドはサーバーでのみ使用できます。",
+        "quota_limit_reached": "📊 文字数をすべて使い切りました。無料の文字数は{reset}にリセットされます。今すぐ追加するには `/premium` を使ってください。",
+        "quota_not_enough": "📊 このメッセージは{needed}文字ですが、残りは{available}文字です。無料の文字数は{reset}にリセットされます。今すぐ追加するには `/premium` を使ってください。",
+        "quota_unavailable": "⚠️ 文字数の残高を確認できませんでした。しばらくしてからもう一度お試しください。",
     },
     "zh-CN": {
         "no_language_set": "🌐 **未设置语言**",
@@ -1687,6 +1719,9 @@ LOCALE_STRINGS = {
         "button_disabled": "翻译按钮已在此服务器**禁用**。",
         "admin_required": "您必须是服务器管理员才能更改此设置。",
         "server_only": "此命令只能在服务器中使用。",
+        "quota_limit_reached": "📊 你的字符已全部用完。免费字符将于{reset}重置。现在需要更多？请使用 `/premium`。",
+        "quota_not_enough": "📊 这条消息有 {needed} 个字符，但你只剩 {available} 个。免费字符将于{reset}重置。现在需要更多？请使用 `/premium`。",
+        "quota_unavailable": "⚠️ 无法检查你的字符余额。请稍后再试。",
     },
     "zh-TW": {
         "no_language_set": "🌐 **未設定語言**",
@@ -1714,6 +1749,9 @@ LOCALE_STRINGS = {
         "button_disabled": "翻譯按鈕已在此伺服器**停用**。",
         "admin_required": "您必須是伺服器管理員才能變更此設定。",
         "server_only": "此命令只能在伺服器中使用。",
+        "quota_limit_reached": "📊 您的字元已全部用完。免費字元將於{reset}重設。現在需要更多？請使用 `/premium`。",
+        "quota_not_enough": "📊 這則訊息有 {needed} 個字元，但您只剩 {available} 個。免費字元將於{reset}重設。現在需要更多？請使用 `/premium`。",
+        "quota_unavailable": "⚠️ 無法檢查您的字元餘額。請稍後再試。",
     },
     "ko": {
         "no_language_set": "🌐 **언어가 설정되지 않았습니다**",
@@ -1741,6 +1779,9 @@ LOCALE_STRINGS = {
         "button_disabled": "번역 버튼이 이 서버에서 **비활성화**되었습니다.",
         "admin_required": "이 설정을 변경하려면 서버 관리자여야 합니다.",
         "server_only": "이 명령은 서버에서만 사용할 수 있습니다.",
+        "quota_limit_reached": "📊 글자 수를 모두 사용했어요. 무료 글자 수는 {reset} 초기화돼요. 지금 더 필요하면 `/premium`을 사용하세요.",
+        "quota_not_enough": "📊 이 메시지는 {needed}자인데 남은 글자 수는 {available}자예요. 무료 글자 수는 {reset} 초기화돼요. 지금 더 필요하면 `/premium`을 사용하세요.",
+        "quota_unavailable": "⚠️ 글자 잔액을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.",
     },
     "it": {
         "no_language_set": "🌐 **Lingua Non Impostata**",
@@ -1766,6 +1807,9 @@ LOCALE_STRINGS = {
         "button_disabled": "I pulsanti di traduzione sono ora **disabilitati** in questo server.",
         "admin_required": "Devi essere un amministratore del server per modificare questa impostazione.",
         "server_only": "Questo comando può essere usato solo in un server.",
+        "quota_limit_reached": "📊 Hai usato tutti i tuoi caratteri. I caratteri gratuiti si rinnovano {reset}. Ne servono altri subito? Usa `/premium`.",
+        "quota_not_enough": "📊 Questo messaggio ha {needed} caratteri, ma te ne restano solo {available}. I caratteri gratuiti si rinnovano {reset}. Ne servono altri subito? Usa `/premium`.",
+        "quota_unavailable": "⚠️ Impossibile verificare il tuo saldo di caratteri. Riprova tra un momento.",
     },
     "nl": {
         "no_language_set": "🌐 **Taal Niet Ingesteld**",
@@ -1791,6 +1835,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Vertaalknoppen zijn nu **uitgeschakeld** in deze server.",
         "admin_required": "Je moet serverbeheerder zijn om deze instelling te wijzigen.",
         "server_only": "Deze opdracht kan alleen in een server worden gebruikt.",
+        "quota_limit_reached": "📊 Je hebt al je tekens gebruikt. Gratis tekens worden {reset} vernieuwd. Nu meer nodig? Gebruik `/premium`.",
+        "quota_not_enough": "📊 Dit bericht heeft {needed} tekens, maar je hebt er nog maar {available}. Gratis tekens worden {reset} vernieuwd. Nu meer nodig? Gebruik `/premium`.",
+        "quota_unavailable": "⚠️ Je tekensaldo kon niet worden gecontroleerd. Probeer het zo opnieuw.",
     },
     "vi": {
         "no_language_set": "🌐 **Chưa Cài Đặt Ngôn Ngữ**",
@@ -1816,6 +1863,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Nút dịch hiện đã **tắt** trong máy chủ này.",
         "admin_required": "Bạn phải là quản trị viên máy chủ để thay đổi cài đặt này.",
         "server_only": "Lệnh này chỉ có thể dùng trong máy chủ.",
+        "quota_limit_reached": "📊 Bạn đã dùng hết ký tự. Ký tự miễn phí sẽ được làm mới {reset}. Cần thêm ngay? Hãy dùng `/premium`.",
+        "quota_not_enough": "📊 Tin nhắn này có {needed} ký tự, nhưng bạn chỉ còn {available}. Ký tự miễn phí sẽ được làm mới {reset}. Cần thêm ngay? Hãy dùng `/premium`.",
+        "quota_unavailable": "⚠️ Không thể kiểm tra số dư ký tự của bạn. Vui lòng thử lại sau giây lát.",
     },
     "fil": {
         "no_language_set": "🌐 **Hindi Nakaset ang Wika**",
@@ -1841,6 +1891,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Ang mga translate button ay **naka-disable** na sa server na ito.",
         "admin_required": "Kailangan mong maging server administrator para baguhin ang setting na ito.",
         "server_only": "Magagamit lang ang command na ito sa isang server.",
+        "quota_limit_reached": "📊 Naubos mo na ang lahat ng iyong character. Mare-renew ang libreng character {reset}. Kailangan mo pa ngayon? Gamitin ang `/premium`.",
+        "quota_not_enough": "📊 May {needed} character ang mensaheng ito, pero {available} na lang ang natitira sa iyo. Mare-renew ang libreng character {reset}. Kailangan mo pa ngayon? Gamitin ang `/premium`.",
+        "quota_unavailable": "⚠️ Hindi ma-check ang iyong character balance. Subukan ulit mamaya.",
     },
     "pl": {
         "no_language_set": "🌐 **Język Nie Jest Ustawiony**",
@@ -1866,6 +1919,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Przyciski tłumaczenia są teraz **wyłączone** na tym serwerze.",
         "admin_required": "Musisz być administratorem serwera, aby zmienić to ustawienie.",
         "server_only": "Tej komendy można używać tylko na serwerze.",
+        "quota_limit_reached": "📊 Wykorzystano wszystkie znaki. Darmowe znaki odnowią się {reset}. Potrzebujesz więcej teraz? Użyj `/premium`.",
+        "quota_not_enough": "📊 Ta wiadomość ma {needed} znaków, a zostało ci tylko {available}. Darmowe znaki odnowią się {reset}. Potrzebujesz więcej teraz? Użyj `/premium`.",
+        "quota_unavailable": "⚠️ Nie udało się sprawdzić salda znaków. Spróbuj ponownie za chwilę.",
     },
     "ru": {
         "no_language_set": "🌐 **Язык Не Выбран**",
@@ -1891,6 +1947,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Кнопки перевода теперь **выключены** на этом сервере.",
         "admin_required": "Вы должны быть администратором сервера, чтобы изменить эту настройку.",
         "server_only": "Эту команду можно использовать только на сервере.",
+        "quota_limit_reached": "📊 Вы израсходовали все символы. Бесплатные символы обновятся {reset}. Нужно больше прямо сейчас? Используйте `/premium`.",
+        "quota_not_enough": "📊 В этом сообщении {needed} символов, а у вас осталось {available}. Бесплатные символы обновятся {reset}. Нужно больше прямо сейчас? Используйте `/premium`.",
+        "quota_unavailable": "⚠️ Не удалось проверить баланс символов. Попробуйте ещё раз чуть позже.",
     },
     "uk": {
         "no_language_set": "🌐 **Мову Не Встановлено**",
@@ -1916,6 +1975,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Кнопки перекладу тепер **вимкнені** на цьому сервері.",
         "admin_required": "Щоб змінити це налаштування, ви маєте бути адміністратором сервера.",
         "server_only": "Цю команду можна використовувати лише на сервері.",
+        "quota_limit_reached": "📊 Ви використали всі символи. Безкоштовні символи оновляться {reset}. Потрібно більше зараз? Скористайтеся `/premium`.",
+        "quota_not_enough": "📊 У цьому повідомленні {needed} символів, а у вас залишилося {available}. Безкоштовні символи оновляться {reset}. Потрібно більше зараз? Скористайтеся `/premium`.",
+        "quota_unavailable": "⚠️ Не вдалося перевірити баланс символів. Спробуйте ще раз трохи згодом.",
     },
     "ar": {
         "no_language_set": "🌐 **لم يتم تعيين اللغة**",
@@ -1941,6 +2003,9 @@ LOCALE_STRINGS = {
         "button_disabled": "أزرار الترجمة الآن **معطلة** في هذا الخادم.",
         "admin_required": "يجب أن تكون مسؤول الخادم لتغيير هذا الإعداد.",
         "server_only": "لا يمكن استخدام هذا الأمر إلا داخل خادم.",
+        "quota_limit_reached": "📊 لقد استخدمت كل الأحرف المتاحة لك. تتجدد الأحرف المجانية {reset}. تحتاج إلى المزيد الآن؟ استخدم `/premium`.",
+        "quota_not_enough": "📊 تحتوي هذه الرسالة على {needed} حرفًا، لكن تبقّى لديك {available} فقط. تتجدد الأحرف المجانية {reset}. تحتاج إلى المزيد الآن؟ استخدم `/premium`.",
+        "quota_unavailable": "⚠️ تعذّر التحقق من رصيد الأحرف. حاول مرة أخرى بعد قليل.",
     },
     "hi": {
         "no_language_set": "🌐 **भाषा सेट नहीं है**",
@@ -1966,6 +2031,9 @@ LOCALE_STRINGS = {
         "button_disabled": "इस सर्वर में अनुवाद बटन अब **निष्क्रिय** हैं।",
         "admin_required": "यह सेटिंग बदलने के लिए आपको सर्वर एडमिन होना होगा।",
         "server_only": "यह कमांड केवल सर्वर में उपयोग की जा सकती है।",
+        "quota_limit_reached": "📊 आपने अपने सभी कैरेक्टर इस्तेमाल कर लिए हैं। मुफ़्त कैरेक्टर {reset} रीन्यू होंगे। अभी और चाहिए? `/premium` इस्तेमाल करें।",
+        "quota_not_enough": "📊 इस संदेश में {needed} कैरेक्टर हैं, लेकिन आपके पास सिर्फ़ {available} बचे हैं। मुफ़्त कैरेक्टर {reset} रीन्यू होंगे। अभी और चाहिए? `/premium` इस्तेमाल करें।",
+        "quota_unavailable": "⚠️ आपका कैरेक्टर बैलेंस जाँचा नहीं जा सका। कृपया थोड़ी देर बाद फिर से कोशिश करें।",
     },
     "tr": {
         "no_language_set": "🌐 **Dil Ayarlanmadı**",
@@ -1991,6 +2059,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Çeviri düğmeleri artık bu sunucuda **devre dışı**.",
         "admin_required": "Bu ayarı değiştirmek için sunucu yöneticisi olmalısınız.",
         "server_only": "Bu komut yalnızca bir sunucuda kullanılabilir.",
+        "quota_limit_reached": "📊 Tüm karakterlerini kullandın. Ücretsiz karakterler {reset} yenilenir. Şimdi daha fazlası mı lazım? `/premium` kullan.",
+        "quota_not_enough": "📊 Bu mesajda {needed} karakter var, ama yalnızca {available} karakterin kaldı. Ücretsiz karakterler {reset} yenilenir. Şimdi daha fazlası mı lazım? `/premium` kullan.",
+        "quota_unavailable": "⚠️ Karakter bakiyen kontrol edilemedi. Birazdan tekrar dene.",
     },
     "id": {
         "no_language_set": "🌐 **Bahasa Belum Diatur**",
@@ -2016,6 +2087,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Tombol terjemahan sekarang **nonaktif** di server ini.",
         "admin_required": "Anda harus menjadi administrator server untuk mengubah pengaturan ini.",
         "server_only": "Perintah ini hanya bisa digunakan di server.",
+        "quota_limit_reached": "📊 Kamu sudah memakai semua karaktermu. Karakter gratis diperbarui {reset}. Butuh lebih sekarang? Gunakan `/premium`.",
+        "quota_not_enough": "📊 Pesan ini berisi {needed} karakter, tetapi sisa karaktermu hanya {available}. Karakter gratis diperbarui {reset}. Butuh lebih sekarang? Gunakan `/premium`.",
+        "quota_unavailable": "⚠️ Saldo karaktermu tidak dapat diperiksa. Coba lagi sebentar lagi.",
     },
     "th": {
         "no_language_set": "🌐 **ยังไม่ได้ตั้งค่าภาษา**",
@@ -2041,6 +2115,9 @@ LOCALE_STRINGS = {
         "button_disabled": "ปุ่มแปลถูก **ปิดใช้งาน** แล้วในเซิร์ฟเวอร์นี้",
         "admin_required": "คุณต้องเป็นผู้ดูแลเซิร์ฟเวอร์เพื่อเปลี่ยนการตั้งค่านี้",
         "server_only": "คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์เท่านั้น",
+        "quota_limit_reached": "📊 คุณใช้ตัวอักษรครบแล้ว ตัวอักษรฟรีจะรีเซ็ต{reset} ต้องการเพิ่มตอนนี้? ใช้ `/premium`",
+        "quota_not_enough": "📊 ข้อความนี้มี {needed} ตัวอักษร แต่คุณเหลือเพียง {available} ตัวอักษรฟรีจะรีเซ็ต{reset} ต้องการเพิ่มตอนนี้? ใช้ `/premium`",
+        "quota_unavailable": "⚠️ ไม่สามารถตรวจสอบยอดตัวอักษรของคุณได้ โปรดลองอีกครั้งในอีกสักครู่",
     },
     "cs": {
         "no_language_set": "🌐 **Jazyk Není Nastaven**",
@@ -2066,6 +2143,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Překladová tlačítka jsou nyní na tomto serveru **zakázána**.",
         "admin_required": "Pro změnu tohoto nastavení musíte být správcem serveru.",
         "server_only": "Tento příkaz lze použít pouze na serveru.",
+        "quota_limit_reached": "📊 Vyčerpal jsi všechny znaky. Bezplatné znaky se obnoví {reset}. Potřebuješ další hned? Použij `/premium`.",
+        "quota_not_enough": "📊 Tato zpráva má {needed} znaků, ale zbývá ti jen {available}. Bezplatné znaky se obnoví {reset}. Potřebuješ další hned? Použij `/premium`.",
+        "quota_unavailable": "⚠️ Zůstatek znaků se nepodařilo ověřit. Zkus to znovu za chvíli.",
     },
     "ro": {
         "no_language_set": "🌐 **Limba Nu Este Setată**",
@@ -2091,6 +2171,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Butoanele de traducere sunt acum **dezactivate** pe acest server.",
         "admin_required": "Trebuie să fii administrator al serverului pentru a schimba această setare.",
         "server_only": "Această comandă poate fi folosită doar pe un server.",
+        "quota_limit_reached": "📊 Ai folosit toate caracterele. Caracterele gratuite se reînnoiesc {reset}. Ai nevoie de mai multe acum? Folosește `/premium`.",
+        "quota_not_enough": "📊 Acest mesaj are {needed} caractere, dar mai ai doar {available}. Caracterele gratuite se reînnoiesc {reset}. Ai nevoie de mai multe acum? Folosește `/premium`.",
+        "quota_unavailable": "⚠️ Nu am putut verifica soldul de caractere. Încearcă din nou peste câteva momente.",
     },
     "bg": {
         "no_language_set": "🌐 **Езикът не е зададен**",
@@ -2118,6 +2201,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Бутоните за превод вече са **изключени** в този сървър.",
         "admin_required": "Трябва да сте администратор на сървъра, за да промените тази настройка.",
         "server_only": "Тази команда може да се използва само в сървър.",
+        "quota_limit_reached": "📊 Използвахте всички символи. Безплатните символи се подновяват {reset}. Нужни са ви още сега? Използвайте `/premium`.",
+        "quota_not_enough": "📊 Това съобщение има {needed} символа, а на вас са ви останали {available}. Безплатните символи се подновяват {reset}. Нужни са ви още сега? Използвайте `/premium`.",
+        "quota_unavailable": "⚠️ Балансът на символите не можа да бъде проверен. Опитайте отново след малко.",
     },
     "hr": {
         "no_language_set": "🌐 **Jezik nije postavljen**",
@@ -2145,6 +2231,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Gumbi za prijevod sada su **isključeni** na ovom poslužitelju.",
         "admin_required": "Morate biti administrator poslužitelja da biste promijenili ovu postavku.",
         "server_only": "Ova se naredba može koristiti samo na poslužitelju.",
+        "quota_limit_reached": "📊 Iskoristili ste sve znakove. Besplatni znakovi obnavljaju se {reset}. Trebate još odmah? Upotrijebite `/premium`.",
+        "quota_not_enough": "📊 Ova poruka ima {needed} znakova, a preostalo vam je samo {available}. Besplatni znakovi obnavljaju se {reset}. Trebate još odmah? Upotrijebite `/premium`.",
+        "quota_unavailable": "⚠️ Nije moguće provjeriti stanje znakova. Pokušajte ponovno za trenutak.",
     },
     "da": {
         "no_language_set": "🌐 **Sprog ikke valgt**",
@@ -2172,6 +2261,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Oversættelsesknapper er nu **slået fra** på denne server.",
         "admin_required": "Du skal være serveradministrator for at ændre denne indstilling.",
         "server_only": "Denne kommando kan kun bruges på en server.",
+        "quota_limit_reached": "📊 Du har brugt alle dine tegn. Gratis tegn fornyes {reset}. Har du brug for flere nu? Brug `/premium`.",
+        "quota_not_enough": "📊 Denne besked har {needed} tegn, men du har kun {available} tilbage. Gratis tegn fornyes {reset}. Har du brug for flere nu? Brug `/premium`.",
+        "quota_unavailable": "⚠️ Din tegnsaldo kunne ikke tjekkes. Prøv igen om lidt.",
     },
     "el": {
         "no_language_set": "🌐 **Δεν έχει οριστεί γλώσσα**",
@@ -2199,6 +2291,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Τα κουμπιά μετάφρασης είναι πλέον **ανενεργά** σε αυτόν τον διακομιστή.",
         "admin_required": "Πρέπει να είστε διαχειριστής του διακομιστή για να αλλάξετε αυτή τη ρύθμιση.",
         "server_only": "Αυτή η εντολή μπορεί να χρησιμοποιηθεί μόνο σε διακομιστή.",
+        "quota_limit_reached": "📊 Έχετε χρησιμοποιήσει όλους τους χαρακτήρες σας. Οι δωρεάν χαρακτήρες ανανεώνονται {reset}. Χρειάζεστε περισσότερους τώρα; Χρησιμοποιήστε το `/premium`.",
+        "quota_not_enough": "📊 Αυτό το μήνυμα έχει {needed} χαρακτήρες, αλλά σας απομένουν μόνο {available}. Οι δωρεάν χαρακτήρες ανανεώνονται {reset}. Χρειάζεστε περισσότερους τώρα; Χρησιμοποιήστε το `/premium`.",
+        "quota_unavailable": "⚠️ Δεν ήταν δυνατός ο έλεγχος του υπολοίπου χαρακτήρων. Δοκιμάστε ξανά σε λίγο.",
     },
     "hu": {
         "no_language_set": "🌐 **Nincs nyelv beállítva**",
@@ -2226,6 +2321,9 @@ LOCALE_STRINGS = {
         "button_disabled": "A fordítás gombok mostantól **ki vannak kapcsolva** ezen a szerveren.",
         "admin_required": "A beállítás módosításához szerveradminisztrátornak kell lenned.",
         "server_only": "Ez a parancs csak szerveren használható.",
+        "quota_limit_reached": "📊 Elhasználtad az összes karakteredet. Az ingyenes karakterek {reset} újulnak meg. Most kellene több? Használd a `/premium` parancsot.",
+        "quota_not_enough": "📊 Ez az üzenet {needed} karakteres, de csak {available} karaktered maradt. Az ingyenes karakterek {reset} újulnak meg. Most kellene több? Használd a `/premium` parancsot.",
+        "quota_unavailable": "⚠️ Nem sikerült ellenőrizni a karakteregyenlegedet. Próbáld újra egy kicsit később.",
     },
     "no": {
         "no_language_set": "🌐 **Språk er ikke valgt**",
@@ -2253,6 +2351,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Oversettelsesknapper er nå **slått av** på denne serveren.",
         "admin_required": "Du må være serveradministrator for å endre denne innstillingen.",
         "server_only": "Denne kommandoen kan bare brukes på en server.",
+        "quota_limit_reached": "📊 Du har brukt alle tegnene dine. Gratis tegn fornyes {reset}. Trenger du flere nå? Bruk `/premium`.",
+        "quota_not_enough": "📊 Denne meldingen har {needed} tegn, men du har bare {available} igjen. Gratis tegn fornyes {reset}. Trenger du flere nå? Bruk `/premium`.",
+        "quota_unavailable": "⚠️ Kunne ikke sjekke tegnsaldoen din. Prøv igjen om litt.",
     },
     "fi": {
         "no_language_set": "🌐 **Kieltä ei ole asetettu**",
@@ -2280,6 +2381,9 @@ LOCALE_STRINGS = {
         "button_disabled": "Käännöspainikkeet ovat nyt **pois käytöstä** tällä palvelimella.",
         "admin_required": "Sinun on oltava palvelimen ylläpitäjä muuttaaksesi tätä asetusta.",
         "server_only": "Tätä komentoa voi käyttää vain palvelimella.",
+        "quota_limit_reached": "📊 Olet käyttänyt kaikki merkkisi. Ilmaiset merkit uusiutuvat {reset}. Tarvitsetko lisää heti? Käytä komentoa `/premium`.",
+        "quota_not_enough": "📊 Tässä viestissä on {needed} merkkiä, mutta sinulla on jäljellä vain {available}. Ilmaiset merkit uusiutuvat {reset}. Tarvitsetko lisää heti? Käytä komentoa `/premium`.",
+        "quota_unavailable": "⚠️ Merkkisaldoasi ei voitu tarkistaa. Yritä hetken kuluttua uudelleen.",
     },
 }
 
@@ -2957,15 +3061,15 @@ class LanguageSelectView(discord.ui.View):
             )
             return
 
-        quota_allowed, quota_warning = await check_translation_quota(
+        quota_allowed, quota_decision = await check_translation_quota(
             interaction.user.id,
             getattr(getattr(interaction, "guild", None), "id", None),
-            len(self.original_message.content or ""),
+            billable_char_count(self.original_message.content),
         )
         if not quota_allowed:
             await send_response(
                 interaction,
-                content=format_quota_error_message(quota_warning),
+                content=format_quota_denial(interaction.locale, quota_decision),
                 ephemeral=True,
             )
             return
@@ -2991,9 +3095,6 @@ class LanguageSelectView(discord.ui.View):
                 interaction.user.id,
                 user_locale
             )
-            quota_message = get_monthly_limit_message(quota_warning)
-            if quota_message:
-                translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
             emit_translation_analytics_event(
                 source="language_select_button",
                 user_id=interaction.user.id,
@@ -3147,15 +3248,15 @@ class TranslateButtonView(discord.ui.View):
                     )
                 return
 
-            quota_allowed, quota_warning = await check_translation_quota(
+            quota_allowed, quota_decision = await check_translation_quota(
                 user_id,
                 getattr(getattr(interaction, "guild", None), "id", None),
-                len(original_message.content or ""),
+                billable_char_count(original_message.content),
             )
             if not quota_allowed:
                 await send_response(
                     interaction,
-                    content=format_quota_error_message(quota_warning),
+                    content=format_quota_denial(interaction.locale, quota_decision),
                     ephemeral=True,
                 )
                 return
@@ -3204,9 +3305,6 @@ class TranslateButtonView(discord.ui.View):
                 await edit_translation_status(interaction, get_maintenance_error_message(interaction.locale))
                 return
 
-            quota_message = get_monthly_limit_message(quota_warning)
-            if quota_message:
-                translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
             emit_translation_analytics_event(
                 source="button",
                 user_id=interaction.user.id,
@@ -3247,7 +3345,7 @@ class TranslateButtonView(discord.ui.View):
 async def on_ready():
     log("Bot", f"logged in as {client.user}")
     if user_quota.USER_QUOTA_ENFORCED:
-        log("Quota", f"monthly limits ON (default {user_quota.DEFAULT_USER_MONTHLY_CHARACTER_LIMIT:,} chars)")
+        log("Quota", f"limits ON ({user_quota.DEFAULT_USER_MONTHLY_CHARACTER_LIMIT:,} free chars/month + packs)")
     else:
         log("Quota", "monthly limits OFF (usage is still counted)")
     await publish_bot_heartbeat("online")
@@ -3559,15 +3657,15 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         return
 
     # User has a saved language, perform the translation
-    quota_allowed, quota_warning = await check_translation_quota(
+    quota_allowed, quota_decision = await check_translation_quota(
         interaction.user.id,
         getattr(getattr(interaction, "guild", None), "id", None),
-        len(message.content or ""),
+        billable_char_count(message.content),
     )
     if not quota_allowed:
         await send_response(
             interaction,
-            content=format_quota_error_message(quota_warning),
+            content=format_quota_denial(interaction.locale, quota_decision),
             ephemeral=True,
         )
         return
@@ -3586,9 +3684,6 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
             interaction.user.id,
             str(interaction.locale).split("-")[0].lower() if interaction.locale else "en",
         )
-        quota_message = format_quota_error_message(quota_warning)
-        if quota_message:
-            translated_text = f"{translated_text}\n\n⚠️ {quota_message}"
 
         emit_translation_analytics_event(
             source="context_menu",
