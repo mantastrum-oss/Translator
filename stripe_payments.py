@@ -59,12 +59,14 @@ class Pack:
     code: str
     chars: int
     price_id: str
+    price_label: str = ""   # shown on the /premium button; must match the Stripe price
 
 
 PACKS = {
-    "small": Pack("small", 30_000, os.getenv("STRIPE_PRICE_SMALL", "").strip()),
-    "large": Pack("large", 60_000, os.getenv("STRIPE_PRICE_LARGE", "").strip()),
+    "small": Pack("small", 30_000, os.getenv("STRIPE_PRICE_SMALL", "").strip(), "€3"),
+    "large": Pack("large", 60_000, os.getenv("STRIPE_PRICE_LARGE", "").strip(), "€5"),
 }
+LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
 
 
 def stripe_is_configured() -> bool:
@@ -101,12 +103,16 @@ def _stripe_request(method: str, path: str, params: Optional[dict] = None) -> di
         raise RuntimeError(f"Stripe HTTP {exc.code}: {message}") from None
 
 
-def create_checkout_session_sync(discord_user_id: int | str, pack_code: str) -> str:
-    """Create a Stripe Checkout page for this user and pack; returns its URL."""
+def create_checkout_session_sync(discord_user_id: int | str, pack_code: str, locale: str = "") -> str:
+    """Create a Stripe Checkout page for this user and pack; returns its URL.
+
+    locale (the buyer's Discord locale) is stored so the thank-you DM can use it.
+    """
     pack = PACKS[pack_code]
     user = str(discord_user_id)
     if not DISCORD_ID_RE.match(user):
         raise ValueError("invalid Discord user id")
+    locale = locale if LOCALE_RE.match(locale or "") else "en-US"
     session = _stripe_request("POST", "checkout/sessions", {
         "mode": "payment",
         "line_items[0][price]": pack.price_id,
@@ -114,6 +120,7 @@ def create_checkout_session_sync(discord_user_id: int | str, pack_code: str) -> 
         "client_reference_id": user,
         "metadata[discord_user_id]": user,
         "metadata[pack_code]": pack.code,
+        "metadata[locale]": locale,
         "payment_intent_data[metadata][discord_user_id]": user,
         "payment_intent_data[metadata][pack_code]": pack.code,
         "success_url": SUCCESS_URL,
@@ -164,7 +171,8 @@ def _list_paid_events_sync(since_ts: int) -> list[dict]:
 
 
 def poll_once_sync(since_ts: int) -> tuple[int, list[dict]]:
-    """Grant every paid session since since_ts. Returns (next since_ts, newly granted rows).
+    """Grant every paid session since since_ts. Returns (next since_ts, newly granted rows;
+    each also carries the buyer's "locale" for the thank-you message).
 
     If a grant fails, the cursor stays before it so the next poll retries it.
     """
@@ -184,7 +192,7 @@ def poll_once_sync(since_ts: int) -> tuple[int, list[dict]]:
             logger.error("Failed to grant pack for session %s: %s", row["stripe_session_id"], exc)
             return event["created"] - 1, granted
         if inserted:
-            granted.append(row)
+            granted.append({**row, "locale": (session.get("metadata") or {}).get("locale") or "en-US"})
         newest = max(newest, event["created"])
     return max(since_ts, newest - POLL_OVERLAP_SECONDS), granted
 

@@ -127,6 +127,7 @@ class TranslatorBot(discord.Client):
         self.add_view(TranslateButtonView())
         start_analytics_worker_if_configured()
         start_stripe_poll_worker()
+        hide_unconfigured_commands(self.tree)
         try:
             await self.tree.set_translator(BotCommandTranslator())
             synced_commands = await self.tree.sync()
@@ -1066,6 +1067,13 @@ def start_heartbeat_worker() -> None:
 stripe_poll_worker_task: asyncio.Task | None = None
 
 
+def hide_unconfigured_commands(tree: app_commands.CommandTree) -> None:
+    """Don't publish /premium until Stripe is configured (keeps PROD unchanged before launch)."""
+    if not stripe_payments.stripe_is_configured() and tree.get_command("premium"):
+        tree.remove_command("premium")
+        log("Commands", "/premium hidden (Stripe not configured)")
+
+
 async def stripe_poll_step(since_ts: int) -> int:
     """One poll: grant paid Stripe sessions as packs. Returns the next cursor."""
     try:
@@ -1077,7 +1085,24 @@ async def stripe_poll_step(since_ts: int) -> int:
         return since_ts
     for row in granted:
         log("Payments", f"granted {row['pack_code']} pack ({row['chars_total']:,} chars) to user {row['user_id']}")
+        await notify_pack_granted(row)
     return next_since
+
+
+async def notify_pack_granted(row: dict) -> None:
+    """Thank the buyer by DM in their Discord language. Never fails the poll (DMs may be closed)."""
+    try:
+        user_id = int(row["user_id"])
+        user = client.get_user(user_id) or await client.fetch_user(user_id)
+        expiry = int(datetime.fromisoformat(row["expires_at"]).timestamp())
+        message = get_localized_string(
+            row.get("locale"), "premium_granted_dm",
+            "✅ Thank you! **{chars}** characters were added to your Translator balance. "
+            "They're valid until {expiry}.",
+        ).format(chars=f"{row['chars_total']:,}", expiry=f"<t:{expiry}:D>")
+        await user.send(message)
+    except Exception as exc:
+        log("Payments", f"thank-you DM not sent to user {row.get('user_id')}: {type(exc).__name__}")
 
 
 async def _stripe_poll_worker() -> None:
@@ -1503,6 +1528,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 You've used all your characters. Free characters renew {reset}. Need more now? Use `/premium`.",
         "quota_not_enough": "📊 This message has {needed} characters, but you have {available} left. Free characters renew {reset}. Need more now? Use `/premium`.",
         "quota_unavailable": "⚠️ Couldn't check your character balance. Please try again in a moment.",
+        "premium_title": "💎 **Your Translator characters**",
+        "premium_free_line": "Free this month: **{left}** of {limit} left · renews {reset}",
+        "premium_packs_line": "Packs: **{left}** left · next expiry {expiry}",
+        "premium_no_packs": "Packs: none",
+        "premium_buy_prompt": "Need more? Buy a pack: one-time payment, valid 60 days, no subscription.",
+        "premium_pack_button": "{chars} characters · {price}",
+        "premium_checkout_ready": "Your payment page is ready. Characters are added automatically within a minute after you pay.",
+        "premium_pay_button": "Pay with Stripe",
+        "premium_unavailable": "Purchases aren't available yet.",
+        "premium_error": "⚠️ Couldn't open the payment page. Please try again in a moment.",
+        "premium_granted_dm": "✅ Thank you! **{chars}** characters were added to your Translator balance. They're valid until {expiry}.",
     },
     "en-GB": {
         "no_language_set": "🌐 **Language Not Set**",
@@ -1533,6 +1569,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 You've used all your characters. Free characters renew {reset}. Need more now? Use `/premium`.",
         "quota_not_enough": "📊 This message has {needed} characters, but you have {available} left. Free characters renew {reset}. Need more now? Use `/premium`.",
         "quota_unavailable": "⚠️ Couldn't check your character balance. Please try again in a moment.",
+        "premium_title": "💎 **Your Translator characters**",
+        "premium_free_line": "Free this month: **{left}** of {limit} left · renews {reset}",
+        "premium_packs_line": "Packs: **{left}** left · next expiry {expiry}",
+        "premium_no_packs": "Packs: none",
+        "premium_buy_prompt": "Need more? Buy a pack: one-time payment, valid 60 days, no subscription.",
+        "premium_pack_button": "{chars} characters · {price}",
+        "premium_checkout_ready": "Your payment page is ready. Characters are added automatically within a minute after you pay.",
+        "premium_pay_button": "Pay with Stripe",
+        "premium_unavailable": "Purchases aren't available yet.",
+        "premium_error": "⚠️ Couldn't open the payment page. Please try again in a moment.",
+        "premium_granted_dm": "✅ Thank you! **{chars}** characters were added to your Translator balance. They're valid until {expiry}.",
     },
     "lt": {
         "no_language_set": "🌐 **Kalba Nenustatyta**",
@@ -1563,6 +1610,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Išnaudojote visus simbolius. Nemokami simboliai atsinaujins {reset}. Reikia daugiau dabar? Naudokite `/premium`.",
         "quota_not_enough": "📊 Šioje žinutėje yra {needed} simbolių, o jums liko {available}. Nemokami simboliai atsinaujins {reset}. Reikia daugiau dabar? Naudokite `/premium`.",
         "quota_unavailable": "⚠️ Nepavyko patikrinti simbolių likučio. Pabandykite po akimirkos.",
+        "premium_title": "💎 **Jūsų Translator simboliai**",
+        "premium_free_line": "Nemokamai šį mėnesį: liko **{left}** iš {limit} · atsinaujins {reset}",
+        "premium_packs_line": "Paketai: liko **{left}** · artimiausias baigiasi {expiry}",
+        "premium_no_packs": "Paketai: nėra",
+        "premium_buy_prompt": "Reikia daugiau? Įsigykite paketą: vienkartinis mokėjimas, galioja 60 dienų, be prenumeratos.",
+        "premium_pack_button": "{chars} simbolių · {price}",
+        "premium_checkout_ready": "Mokėjimo puslapis paruoštas. Apmokėjus simboliai bus pridėti automatiškai per minutę.",
+        "premium_pay_button": "Mokėti per Stripe",
+        "premium_unavailable": "Pirkimai dar negalimi.",
+        "premium_error": "⚠️ Nepavyko atidaryti mokėjimo puslapio. Pabandykite po akimirkos.",
+        "premium_granted_dm": "✅ Ačiū! Prie jūsų Translator likučio pridėta **{chars}** simbolių. Jie galioja iki {expiry}.",
     },
     "de": {
         "no_language_set": "🌐 **Sprache nicht festgelegt**",
@@ -1593,6 +1651,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Du hast alle deine Zeichen verbraucht. Kostenlose Zeichen werden {reset} erneuert. Brauchst du jetzt mehr? Nutze `/premium`.",
         "quota_not_enough": "📊 Diese Nachricht hat {needed} Zeichen, du hast aber nur noch {available}. Kostenlose Zeichen werden {reset} erneuert. Brauchst du jetzt mehr? Nutze `/premium`.",
         "quota_unavailable": "⚠️ Dein Zeichenguthaben konnte nicht geprüft werden. Versuch es gleich noch einmal.",
+        "premium_title": "💎 **Deine Translator-Zeichen**",
+        "premium_free_line": "Kostenlos diesen Monat: **{left}** von {limit} übrig · erneuert {reset}",
+        "premium_packs_line": "Pakete: **{left}** übrig · nächster Ablauf {expiry}",
+        "premium_no_packs": "Pakete: keine",
+        "premium_buy_prompt": "Brauchst du mehr? Kauf ein Paket: einmalige Zahlung, 60 Tage gültig, kein Abo.",
+        "premium_pack_button": "{chars} Zeichen · {price}",
+        "premium_checkout_ready": "Deine Zahlungsseite ist bereit. Die Zeichen werden nach der Zahlung innerhalb einer Minute automatisch hinzugefügt.",
+        "premium_pay_button": "Mit Stripe bezahlen",
+        "premium_unavailable": "Käufe sind noch nicht verfügbar.",
+        "premium_error": "⚠️ Die Zahlungsseite konnte nicht geöffnet werden. Versuch es gleich noch einmal.",
+        "premium_granted_dm": "✅ Danke! **{chars}** Zeichen wurden deinem Translator-Guthaben hinzugefügt. Sie sind gültig bis {expiry}.",
     },
     "es-ES": {
         "no_language_set": "🌐 **Idioma No Configurado**",
@@ -1623,6 +1692,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Has usado todos tus caracteres. Los caracteres gratuitos se renuevan {reset}. ¿Necesitas más ahora? Usa `/premium`.",
         "quota_not_enough": "📊 Este mensaje tiene {needed} caracteres, pero solo te quedan {available}. Los caracteres gratuitos se renuevan {reset}. ¿Necesitas más ahora? Usa `/premium`.",
         "quota_unavailable": "⚠️ No se pudo comprobar tu saldo de caracteres. Inténtalo de nuevo en un momento.",
+        "premium_title": "💎 **Tus caracteres de Translator**",
+        "premium_free_line": "Gratis este mes: te quedan **{left}** de {limit} · se renuevan {reset}",
+        "premium_packs_line": "Paquetes: quedan **{left}** · próximo vencimiento {expiry}",
+        "premium_no_packs": "Paquetes: ninguno",
+        "premium_buy_prompt": "¿Necesitas más? Compra un paquete: pago único, válido 60 días, sin suscripción.",
+        "premium_pack_button": "{chars} caracteres · {price}",
+        "premium_checkout_ready": "Tu página de pago está lista. Los caracteres se añaden automáticamente en un minuto tras pagar.",
+        "premium_pay_button": "Pagar con Stripe",
+        "premium_unavailable": "Las compras aún no están disponibles.",
+        "premium_error": "⚠️ No se pudo abrir la página de pago. Inténtalo de nuevo en un momento.",
+        "premium_granted_dm": "✅ ¡Gracias! Se añadieron **{chars}** caracteres a tu saldo de Translator. Son válidos hasta {expiry}.",
     },
     "fr": {
         "no_language_set": "🌐 **Langue Non Définie**",
@@ -1653,6 +1733,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Vous avez utilisé tous vos caractères. Les caractères gratuits se renouvellent {reset}. Besoin de plus maintenant ? Utilisez `/premium`.",
         "quota_not_enough": "📊 Ce message contient {needed} caractères, mais il ne vous en reste que {available}. Les caractères gratuits se renouvellent {reset}. Besoin de plus maintenant ? Utilisez `/premium`.",
         "quota_unavailable": "⚠️ Impossible de vérifier votre solde de caractères. Réessayez dans un instant.",
+        "premium_title": "💎 **Vos caractères Translator**",
+        "premium_free_line": "Gratuits ce mois-ci : **{left}** sur {limit} restants · renouvellement {reset}",
+        "premium_packs_line": "Packs : **{left}** restants · prochaine expiration {expiry}",
+        "premium_no_packs": "Packs : aucun",
+        "premium_buy_prompt": "Besoin de plus ? Achetez un pack : paiement unique, valable 60 jours, sans abonnement.",
+        "premium_pack_button": "{chars} caractères · {price}",
+        "premium_checkout_ready": "Votre page de paiement est prête. Les caractères sont ajoutés automatiquement dans la minute qui suit le paiement.",
+        "premium_pay_button": "Payer avec Stripe",
+        "premium_unavailable": "Les achats ne sont pas encore disponibles.",
+        "premium_error": "⚠️ Impossible d'ouvrir la page de paiement. Réessayez dans un instant.",
+        "premium_granted_dm": "✅ Merci ! **{chars}** caractères ont été ajoutés à votre solde Translator. Ils sont valables jusqu'au {expiry}.",
     },
     "pt-BR": {
         "no_language_set": "🌐 **Idioma Não Definido**",
@@ -1683,6 +1774,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Você usou todos os seus caracteres. Os caracteres gratuitos são renovados {reset}. Precisa de mais agora? Use `/premium`.",
         "quota_not_enough": "📊 Esta mensagem tem {needed} caracteres, mas você só tem {available}. Os caracteres gratuitos são renovados {reset}. Precisa de mais agora? Use `/premium`.",
         "quota_unavailable": "⚠️ Não foi possível verificar seu saldo de caracteres. Tente novamente em instantes.",
+        "premium_title": "💎 **Seus caracteres do Translator**",
+        "premium_free_line": "Grátis este mês: restam **{left}** de {limit} · renova {reset}",
+        "premium_packs_line": "Pacotes: restam **{left}** · próximo vencimento {expiry}",
+        "premium_no_packs": "Pacotes: nenhum",
+        "premium_buy_prompt": "Precisa de mais? Compre um pacote: pagamento único, válido por 60 dias, sem assinatura.",
+        "premium_pack_button": "{chars} caracteres · {price}",
+        "premium_checkout_ready": "Sua página de pagamento está pronta. Os caracteres são adicionados automaticamente em até um minuto após o pagamento.",
+        "premium_pay_button": "Pagar com Stripe",
+        "premium_unavailable": "As compras ainda não estão disponíveis.",
+        "premium_error": "⚠️ Não foi possível abrir a página de pagamento. Tente novamente em instantes.",
+        "premium_granted_dm": "✅ Obrigado! **{chars}** caracteres foram adicionados ao seu saldo do Translator. Eles valem até {expiry}.",
     },
     "sv-SE": {
         "no_language_set": "🌐 **Språk Inte Inställt**",
@@ -1713,6 +1815,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Du har använt alla dina tecken. Gratistecken förnyas {reset}. Behöver du fler nu? Använd `/premium`.",
         "quota_not_enough": "📊 Det här meddelandet har {needed} tecken, men du har bara {available} kvar. Gratistecken förnyas {reset}. Behöver du fler nu? Använd `/premium`.",
         "quota_unavailable": "⚠️ Det gick inte att kontrollera ditt teckensaldo. Försök igen om en stund.",
+        "premium_title": "💎 **Dina Translator-tecken**",
+        "premium_free_line": "Gratis denna månad: **{left}** av {limit} kvar · förnyas {reset}",
+        "premium_packs_line": "Paket: **{left}** kvar · nästa utgång {expiry}",
+        "premium_no_packs": "Paket: inga",
+        "premium_buy_prompt": "Behöver du fler? Köp ett paket: engångsbetalning, giltigt i 60 dagar, ingen prenumeration.",
+        "premium_pack_button": "{chars} tecken · {price}",
+        "premium_checkout_ready": "Din betalningssida är klar. Tecknen läggs till automatiskt inom en minut efter betalningen.",
+        "premium_pay_button": "Betala med Stripe",
+        "premium_unavailable": "Köp är inte tillgängliga än.",
+        "premium_error": "⚠️ Det gick inte att öppna betalningssidan. Försök igen om en stund.",
+        "premium_granted_dm": "✅ Tack! **{chars}** tecken har lagts till i ditt Translator-saldo. De gäller till {expiry}.",
     },
     "ja": {
         "no_language_set": "🌐 **言語が設定されていません**",
@@ -1743,6 +1856,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 文字数をすべて使い切りました。無料の文字数は{reset}にリセットされます。今すぐ追加するには `/premium` を使ってください。",
         "quota_not_enough": "📊 このメッセージは{needed}文字ですが、残りは{available}文字です。無料の文字数は{reset}にリセットされます。今すぐ追加するには `/premium` を使ってください。",
         "quota_unavailable": "⚠️ 文字数の残高を確認できませんでした。しばらくしてからもう一度お試しください。",
+        "premium_title": "💎 **Translator の文字数**",
+        "premium_free_line": "今月の無料分：残り **{left}** / {limit} · {reset}にリセット",
+        "premium_packs_line": "パック：残り **{left}** · 次の有効期限 {expiry}",
+        "premium_no_packs": "パック：なし",
+        "premium_buy_prompt": "もっと必要ですか？パックを購入：1回払い、60日間有効、サブスクなし。",
+        "premium_pack_button": "{chars}文字 · {price}",
+        "premium_checkout_ready": "支払いページの準備ができました。支払い後1分以内に文字数が自動で追加されます。",
+        "premium_pay_button": "Stripeで支払う",
+        "premium_unavailable": "購入はまだご利用いただけません。",
+        "premium_error": "⚠️ 支払いページを開けませんでした。しばらくしてからもう一度お試しください。",
+        "premium_granted_dm": "✅ ありがとうございます！Translatorの残高に **{chars}** 文字が追加されました。有効期限は{expiry}です。",
     },
     "zh-CN": {
         "no_language_set": "🌐 **未设置语言**",
@@ -1773,6 +1897,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 你的字符已全部用完。免费字符将于{reset}重置。现在需要更多？请使用 `/premium`。",
         "quota_not_enough": "📊 这条消息有 {needed} 个字符，但你只剩 {available} 个。免费字符将于{reset}重置。现在需要更多？请使用 `/premium`。",
         "quota_unavailable": "⚠️ 无法检查你的字符余额。请稍后再试。",
+        "premium_title": "💎 **你的 Translator 字符**",
+        "premium_free_line": "本月免费：剩余 **{left}** / {limit} · {reset}重置",
+        "premium_packs_line": "字符包：剩余 **{left}** · 最近到期 {expiry}",
+        "premium_no_packs": "字符包：无",
+        "premium_buy_prompt": "需要更多？购买字符包：一次性付款，有效期 60 天，无需订阅。",
+        "premium_pack_button": "{chars} 个字符 · {price}",
+        "premium_checkout_ready": "付款页面已准备好。付款后一分钟内会自动添加字符。",
+        "premium_pay_button": "使用 Stripe 付款",
+        "premium_unavailable": "暂时还不能购买。",
+        "premium_error": "⚠️ 无法打开付款页面。请稍后再试。",
+        "premium_granted_dm": "✅ 谢谢！已向你的 Translator 余额添加 **{chars}** 个字符，有效期至 {expiry}。",
     },
     "zh-TW": {
         "no_language_set": "🌐 **未設定語言**",
@@ -1803,6 +1938,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 您的字元已全部用完。免費字元將於{reset}重設。現在需要更多？請使用 `/premium`。",
         "quota_not_enough": "📊 這則訊息有 {needed} 個字元，但您只剩 {available} 個。免費字元將於{reset}重設。現在需要更多？請使用 `/premium`。",
         "quota_unavailable": "⚠️ 無法檢查您的字元餘額。請稍後再試。",
+        "premium_title": "💎 **您的 Translator 字元**",
+        "premium_free_line": "本月免費：剩餘 **{left}** / {limit} · {reset}重設",
+        "premium_packs_line": "字元包：剩餘 **{left}** · 最近到期 {expiry}",
+        "premium_no_packs": "字元包：無",
+        "premium_buy_prompt": "需要更多？購買字元包：一次性付款，有效期 60 天，無需訂閱。",
+        "premium_pack_button": "{chars} 個字元 · {price}",
+        "premium_checkout_ready": "付款頁面已準備好。付款後一分鐘內會自動加入字元。",
+        "premium_pay_button": "使用 Stripe 付款",
+        "premium_unavailable": "目前尚無法購買。",
+        "premium_error": "⚠️ 無法開啟付款頁面。請稍後再試。",
+        "premium_granted_dm": "✅ 謝謝！已在您的 Translator 餘額中加入 **{chars}** 個字元，有效期至 {expiry}。",
     },
     "ko": {
         "no_language_set": "🌐 **언어가 설정되지 않았습니다**",
@@ -1833,6 +1979,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 글자 수를 모두 사용했어요. 무료 글자 수는 {reset} 초기화돼요. 지금 더 필요하면 `/premium`을 사용하세요.",
         "quota_not_enough": "📊 이 메시지는 {needed}자인데 남은 글자 수는 {available}자예요. 무료 글자 수는 {reset} 초기화돼요. 지금 더 필요하면 `/premium`을 사용하세요.",
         "quota_unavailable": "⚠️ 글자 잔액을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.",
+        "premium_title": "💎 **내 Translator 글자 수**",
+        "premium_free_line": "이번 달 무료: {limit}자 중 **{left}**자 남음 · {reset} 초기화",
+        "premium_packs_line": "패키지: **{left}**자 남음 · 다음 만료 {expiry}",
+        "premium_no_packs": "패키지: 없음",
+        "premium_buy_prompt": "더 필요하신가요? 패키지를 구매하세요: 일회성 결제, 60일간 유효, 구독 없음.",
+        "premium_pack_button": "{chars}자 · {price}",
+        "premium_checkout_ready": "결제 페이지가 준비됐어요. 결제 후 1분 안에 글자 수가 자동으로 추가돼요.",
+        "premium_pay_button": "Stripe로 결제",
+        "premium_unavailable": "아직 구매할 수 없어요.",
+        "premium_error": "⚠️ 결제 페이지를 열지 못했어요. 잠시 후 다시 시도해 주세요.",
+        "premium_granted_dm": "✅ 감사합니다! Translator 잔액에 **{chars}**자가 추가됐어요. {expiry}까지 사용할 수 있어요.",
     },
     "it": {
         "no_language_set": "🌐 **Lingua Non Impostata**",
@@ -1861,6 +2018,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Hai usato tutti i tuoi caratteri. I caratteri gratuiti si rinnovano {reset}. Ne servono altri subito? Usa `/premium`.",
         "quota_not_enough": "📊 Questo messaggio ha {needed} caratteri, ma te ne restano solo {available}. I caratteri gratuiti si rinnovano {reset}. Ne servono altri subito? Usa `/premium`.",
         "quota_unavailable": "⚠️ Impossibile verificare il tuo saldo di caratteri. Riprova tra un momento.",
+        "premium_title": "💎 **I tuoi caratteri Translator**",
+        "premium_free_line": "Gratis questo mese: ne restano **{left}** su {limit} · si rinnovano {reset}",
+        "premium_packs_line": "Pacchetti: ne restano **{left}** · prossima scadenza {expiry}",
+        "premium_no_packs": "Pacchetti: nessuno",
+        "premium_buy_prompt": "Ne servono altri? Acquista un pacchetto: pagamento unico, valido 60 giorni, nessun abbonamento.",
+        "premium_pack_button": "{chars} caratteri · {price}",
+        "premium_checkout_ready": "La tua pagina di pagamento è pronta. I caratteri vengono aggiunti automaticamente entro un minuto dal pagamento.",
+        "premium_pay_button": "Paga con Stripe",
+        "premium_unavailable": "Gli acquisti non sono ancora disponibili.",
+        "premium_error": "⚠️ Impossibile aprire la pagina di pagamento. Riprova tra un momento.",
+        "premium_granted_dm": "✅ Grazie! Sono stati aggiunti **{chars}** caratteri al tuo saldo Translator. Sono validi fino al {expiry}.",
     },
     "nl": {
         "no_language_set": "🌐 **Taal Niet Ingesteld**",
@@ -1889,6 +2057,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Je hebt al je tekens gebruikt. Gratis tekens worden {reset} vernieuwd. Nu meer nodig? Gebruik `/premium`.",
         "quota_not_enough": "📊 Dit bericht heeft {needed} tekens, maar je hebt er nog maar {available}. Gratis tekens worden {reset} vernieuwd. Nu meer nodig? Gebruik `/premium`.",
         "quota_unavailable": "⚠️ Je tekensaldo kon niet worden gecontroleerd. Probeer het zo opnieuw.",
+        "premium_title": "💎 **Je Translator-tekens**",
+        "premium_free_line": "Gratis deze maand: nog **{left}** van {limit} · vernieuwd {reset}",
+        "premium_packs_line": "Pakketten: nog **{left}** · volgende vervaldatum {expiry}",
+        "premium_no_packs": "Pakketten: geen",
+        "premium_buy_prompt": "Meer nodig? Koop een pakket: eenmalige betaling, 60 dagen geldig, geen abonnement.",
+        "premium_pack_button": "{chars} tekens · {price}",
+        "premium_checkout_ready": "Je betaalpagina staat klaar. De tekens worden binnen een minuut na betaling automatisch toegevoegd.",
+        "premium_pay_button": "Betalen met Stripe",
+        "premium_unavailable": "Aankopen zijn nog niet beschikbaar.",
+        "premium_error": "⚠️ De betaalpagina kon niet worden geopend. Probeer het zo opnieuw.",
+        "premium_granted_dm": "✅ Bedankt! Er zijn **{chars}** tekens aan je Translator-saldo toegevoegd. Ze zijn geldig tot {expiry}.",
     },
     "vi": {
         "no_language_set": "🌐 **Chưa Cài Đặt Ngôn Ngữ**",
@@ -1917,6 +2096,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Bạn đã dùng hết ký tự. Ký tự miễn phí sẽ được làm mới {reset}. Cần thêm ngay? Hãy dùng `/premium`.",
         "quota_not_enough": "📊 Tin nhắn này có {needed} ký tự, nhưng bạn chỉ còn {available}. Ký tự miễn phí sẽ được làm mới {reset}. Cần thêm ngay? Hãy dùng `/premium`.",
         "quota_unavailable": "⚠️ Không thể kiểm tra số dư ký tự của bạn. Vui lòng thử lại sau giây lát.",
+        "premium_title": "💎 **Ký tự Translator của bạn**",
+        "premium_free_line": "Miễn phí tháng này: còn **{left}** / {limit} · làm mới {reset}",
+        "premium_packs_line": "Gói: còn **{left}** · hết hạn gần nhất {expiry}",
+        "premium_no_packs": "Gói: không có",
+        "premium_buy_prompt": "Cần thêm? Mua một gói: thanh toán một lần, hiệu lực 60 ngày, không đăng ký định kỳ.",
+        "premium_pack_button": "{chars} ký tự · {price}",
+        "premium_checkout_ready": "Trang thanh toán đã sẵn sàng. Ký tự sẽ được tự động thêm trong vòng một phút sau khi thanh toán.",
+        "premium_pay_button": "Thanh toán bằng Stripe",
+        "premium_unavailable": "Hiện chưa thể mua.",
+        "premium_error": "⚠️ Không thể mở trang thanh toán. Vui lòng thử lại sau giây lát.",
+        "premium_granted_dm": "✅ Cảm ơn bạn! Đã thêm **{chars}** ký tự vào số dư Translator của bạn. Có hiệu lực đến {expiry}.",
     },
     "fil": {
         "no_language_set": "🌐 **Hindi Nakaset ang Wika**",
@@ -1945,6 +2135,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Naubos mo na ang lahat ng iyong character. Mare-renew ang libreng character {reset}. Kailangan mo pa ngayon? Gamitin ang `/premium`.",
         "quota_not_enough": "📊 May {needed} character ang mensaheng ito, pero {available} na lang ang natitira sa iyo. Mare-renew ang libreng character {reset}. Kailangan mo pa ngayon? Gamitin ang `/premium`.",
         "quota_unavailable": "⚠️ Hindi ma-check ang iyong character balance. Subukan ulit mamaya.",
+        "premium_title": "💎 **Ang iyong mga Translator character**",
+        "premium_free_line": "Libre ngayong buwan: **{left}** sa {limit} ang natitira · mare-renew {reset}",
+        "premium_packs_line": "Mga pack: **{left}** ang natitira · susunod na expiry {expiry}",
+        "premium_no_packs": "Mga pack: wala",
+        "premium_buy_prompt": "Kailangan pa? Bumili ng pack: isang beses na bayad, valid nang 60 araw, walang subscription.",
+        "premium_pack_button": "{chars} character · {price}",
+        "premium_checkout_ready": "Handa na ang iyong payment page. Awtomatikong idaragdag ang mga character sa loob ng isang minuto pagkatapos magbayad.",
+        "premium_pay_button": "Magbayad gamit ang Stripe",
+        "premium_unavailable": "Hindi pa available ang pagbili.",
+        "premium_error": "⚠️ Hindi mabuksan ang payment page. Subukan ulit mamaya.",
+        "premium_granted_dm": "✅ Salamat! Naidagdag ang **{chars}** character sa iyong Translator balance. Valid ang mga ito hanggang {expiry}.",
     },
     "pl": {
         "no_language_set": "🌐 **Język Nie Jest Ustawiony**",
@@ -1973,6 +2174,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Wykorzystano wszystkie znaki. Darmowe znaki odnowią się {reset}. Potrzebujesz więcej teraz? Użyj `/premium`.",
         "quota_not_enough": "📊 Ta wiadomość ma {needed} znaków, a zostało ci tylko {available}. Darmowe znaki odnowią się {reset}. Potrzebujesz więcej teraz? Użyj `/premium`.",
         "quota_unavailable": "⚠️ Nie udało się sprawdzić salda znaków. Spróbuj ponownie za chwilę.",
+        "premium_title": "💎 **Twoje znaki Translator**",
+        "premium_free_line": "Za darmo w tym miesiącu: zostało **{left}** z {limit} · odnowienie {reset}",
+        "premium_packs_line": "Pakiety: zostało **{left}** · najbliższe wygaśnięcie {expiry}",
+        "premium_no_packs": "Pakiety: brak",
+        "premium_buy_prompt": "Potrzebujesz więcej? Kup pakiet: jednorazowa płatność, ważny 60 dni, bez subskrypcji.",
+        "premium_pack_button": "{chars} znaków · {price}",
+        "premium_checkout_ready": "Strona płatności jest gotowa. Znaki zostaną dodane automatycznie w ciągu minuty po zapłacie.",
+        "premium_pay_button": "Zapłać przez Stripe",
+        "premium_unavailable": "Zakupy nie są jeszcze dostępne.",
+        "premium_error": "⚠️ Nie udało się otworzyć strony płatności. Spróbuj ponownie za chwilę.",
+        "premium_granted_dm": "✅ Dziękujemy! Do Twojego salda Translator dodano **{chars}** znaków. Są ważne do {expiry}.",
     },
     "ru": {
         "no_language_set": "🌐 **Язык Не Выбран**",
@@ -2001,6 +2213,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Вы израсходовали все символы. Бесплатные символы обновятся {reset}. Нужно больше прямо сейчас? Используйте `/premium`.",
         "quota_not_enough": "📊 В этом сообщении {needed} символов, а у вас осталось {available}. Бесплатные символы обновятся {reset}. Нужно больше прямо сейчас? Используйте `/premium`.",
         "quota_unavailable": "⚠️ Не удалось проверить баланс символов. Попробуйте ещё раз чуть позже.",
+        "premium_title": "💎 **Ваши символы Translator**",
+        "premium_free_line": "Бесплатно в этом месяце: осталось **{left}** из {limit} · обновление {reset}",
+        "premium_packs_line": "Пакеты: осталось **{left}** · ближайшее истечение {expiry}",
+        "premium_no_packs": "Пакеты: нет",
+        "premium_buy_prompt": "Нужно больше? Купите пакет: разовый платёж, действует 60 дней, без подписки.",
+        "premium_pack_button": "{chars} символов · {price}",
+        "premium_checkout_ready": "Страница оплаты готова. Символы будут добавлены автоматически в течение минуты после оплаты.",
+        "premium_pay_button": "Оплатить через Stripe",
+        "premium_unavailable": "Покупки пока недоступны.",
+        "premium_error": "⚠️ Не удалось открыть страницу оплаты. Попробуйте ещё раз чуть позже.",
+        "premium_granted_dm": "✅ Спасибо! На ваш баланс Translator добавлено **{chars}** символов. Они действуют до {expiry}.",
     },
     "uk": {
         "no_language_set": "🌐 **Мову Не Встановлено**",
@@ -2029,6 +2252,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Ви використали всі символи. Безкоштовні символи оновляться {reset}. Потрібно більше зараз? Скористайтеся `/premium`.",
         "quota_not_enough": "📊 У цьому повідомленні {needed} символів, а у вас залишилося {available}. Безкоштовні символи оновляться {reset}. Потрібно більше зараз? Скористайтеся `/premium`.",
         "quota_unavailable": "⚠️ Не вдалося перевірити баланс символів. Спробуйте ще раз трохи згодом.",
+        "premium_title": "💎 **Ваші символи Translator**",
+        "premium_free_line": "Безкоштовно цього місяця: залишилося **{left}** з {limit} · оновлення {reset}",
+        "premium_packs_line": "Пакети: залишилося **{left}** · найближче закінчення {expiry}",
+        "premium_no_packs": "Пакети: немає",
+        "premium_buy_prompt": "Потрібно більше? Придбайте пакет: разовий платіж, діє 60 днів, без підписки.",
+        "premium_pack_button": "{chars} символів · {price}",
+        "premium_checkout_ready": "Сторінка оплати готова. Символи буде додано автоматично протягом хвилини після оплати.",
+        "premium_pay_button": "Оплатити через Stripe",
+        "premium_unavailable": "Покупки поки недоступні.",
+        "premium_error": "⚠️ Не вдалося відкрити сторінку оплати. Спробуйте ще раз трохи згодом.",
+        "premium_granted_dm": "✅ Дякуємо! До вашого балансу Translator додано **{chars}** символів. Вони дійсні до {expiry}.",
     },
     "ar": {
         "no_language_set": "🌐 **لم يتم تعيين اللغة**",
@@ -2057,6 +2291,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 لقد استخدمت كل الأحرف المتاحة لك. تتجدد الأحرف المجانية {reset}. تحتاج إلى المزيد الآن؟ استخدم `/premium`.",
         "quota_not_enough": "📊 تحتوي هذه الرسالة على {needed} حرفًا، لكن تبقّى لديك {available} فقط. تتجدد الأحرف المجانية {reset}. تحتاج إلى المزيد الآن؟ استخدم `/premium`.",
         "quota_unavailable": "⚠️ تعذّر التحقق من رصيد الأحرف. حاول مرة أخرى بعد قليل.",
+        "premium_title": "💎 **أحرف Translator الخاصة بك**",
+        "premium_free_line": "مجانًا هذا الشهر: تبقّى **{left}** من {limit} · تتجدد {reset}",
+        "premium_packs_line": "الحزم: تبقّى **{left}** · أقرب انتهاء {expiry}",
+        "premium_no_packs": "الحزم: لا يوجد",
+        "premium_buy_prompt": "تحتاج إلى المزيد؟ اشترِ حزمة: دفعة واحدة، صالحة لمدة 60 يومًا، بدون اشتراك.",
+        "premium_pack_button": "{chars} حرف · {price}",
+        "premium_checkout_ready": "صفحة الدفع جاهزة. تُضاف الأحرف تلقائيًا خلال دقيقة بعد الدفع.",
+        "premium_pay_button": "الدفع عبر Stripe",
+        "premium_unavailable": "الشراء غير متاح بعد.",
+        "premium_error": "⚠️ تعذّر فتح صفحة الدفع. حاول مرة أخرى بعد قليل.",
+        "premium_granted_dm": "✅ شكرًا لك! تمت إضافة **{chars}** حرف إلى رصيدك في Translator. وهي صالحة حتى {expiry}.",
     },
     "hi": {
         "no_language_set": "🌐 **भाषा सेट नहीं है**",
@@ -2085,6 +2330,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 आपने अपने सभी कैरेक्टर इस्तेमाल कर लिए हैं। मुफ़्त कैरेक्टर {reset} रीन्यू होंगे। अभी और चाहिए? `/premium` इस्तेमाल करें।",
         "quota_not_enough": "📊 इस संदेश में {needed} कैरेक्टर हैं, लेकिन आपके पास सिर्फ़ {available} बचे हैं। मुफ़्त कैरेक्टर {reset} रीन्यू होंगे। अभी और चाहिए? `/premium` इस्तेमाल करें।",
         "quota_unavailable": "⚠️ आपका कैरेक्टर बैलेंस जाँचा नहीं जा सका। कृपया थोड़ी देर बाद फिर से कोशिश करें।",
+        "premium_title": "💎 **आपके Translator कैरेक्टर**",
+        "premium_free_line": "इस महीने मुफ़्त: {limit} में से **{left}** बचे · रीन्यू {reset}",
+        "premium_packs_line": "पैक: **{left}** बचे · अगली समाप्ति {expiry}",
+        "premium_no_packs": "पैक: कोई नहीं",
+        "premium_buy_prompt": "और चाहिए? एक पैक खरीदें: एक बार का भुगतान, 60 दिन वैध, कोई सब्सक्रिप्शन नहीं।",
+        "premium_pack_button": "{chars} कैरेक्टर · {price}",
+        "premium_checkout_ready": "आपका भुगतान पेज तैयार है। भुगतान के एक मिनट के अंदर कैरेक्टर अपने-आप जुड़ जाएंगे।",
+        "premium_pay_button": "Stripe से भुगतान करें",
+        "premium_unavailable": "खरीदारी अभी उपलब्ध नहीं है।",
+        "premium_error": "⚠️ भुगतान पेज नहीं खुल सका। कृपया थोड़ी देर बाद फिर से कोशिश करें।",
+        "premium_granted_dm": "✅ धन्यवाद! आपके Translator बैलेंस में **{chars}** कैरेक्टर जोड़ दिए गए हैं। ये {expiry} तक वैध हैं।",
     },
     "tr": {
         "no_language_set": "🌐 **Dil Ayarlanmadı**",
@@ -2113,6 +2369,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Tüm karakterlerini kullandın. Ücretsiz karakterler {reset} yenilenir. Şimdi daha fazlası mı lazım? `/premium` kullan.",
         "quota_not_enough": "📊 Bu mesajda {needed} karakter var, ama yalnızca {available} karakterin kaldı. Ücretsiz karakterler {reset} yenilenir. Şimdi daha fazlası mı lazım? `/premium` kullan.",
         "quota_unavailable": "⚠️ Karakter bakiyen kontrol edilemedi. Birazdan tekrar dene.",
+        "premium_title": "💎 **Translator karakterlerin**",
+        "premium_free_line": "Bu ay ücretsiz: {limit} karakterden **{left}** kaldı · {reset} yenilenir",
+        "premium_packs_line": "Paketler: **{left}** kaldı · en yakın bitiş {expiry}",
+        "premium_no_packs": "Paketler: yok",
+        "premium_buy_prompt": "Daha fazlası mı lazım? Bir paket al: tek seferlik ödeme, 60 gün geçerli, abonelik yok.",
+        "premium_pack_button": "{chars} karakter · {price}",
+        "premium_checkout_ready": "Ödeme sayfan hazır. Ödemeden sonra bir dakika içinde karakterler otomatik olarak eklenir.",
+        "premium_pay_button": "Stripe ile öde",
+        "premium_unavailable": "Satın alma henüz kullanılamıyor.",
+        "premium_error": "⚠️ Ödeme sayfası açılamadı. Birazdan tekrar dene.",
+        "premium_granted_dm": "✅ Teşekkürler! Translator bakiyene **{chars}** karakter eklendi. {expiry} tarihine kadar geçerli.",
     },
     "id": {
         "no_language_set": "🌐 **Bahasa Belum Diatur**",
@@ -2141,6 +2408,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Kamu sudah memakai semua karaktermu. Karakter gratis diperbarui {reset}. Butuh lebih sekarang? Gunakan `/premium`.",
         "quota_not_enough": "📊 Pesan ini berisi {needed} karakter, tetapi sisa karaktermu hanya {available}. Karakter gratis diperbarui {reset}. Butuh lebih sekarang? Gunakan `/premium`.",
         "quota_unavailable": "⚠️ Saldo karaktermu tidak dapat diperiksa. Coba lagi sebentar lagi.",
+        "premium_title": "💎 **Karakter Translator-mu**",
+        "premium_free_line": "Gratis bulan ini: sisa **{left}** dari {limit} · diperbarui {reset}",
+        "premium_packs_line": "Paket: sisa **{left}** · kedaluwarsa terdekat {expiry}",
+        "premium_no_packs": "Paket: tidak ada",
+        "premium_buy_prompt": "Butuh lebih? Beli paket: sekali bayar, berlaku 60 hari, tanpa langganan.",
+        "premium_pack_button": "{chars} karakter · {price}",
+        "premium_checkout_ready": "Halaman pembayaranmu sudah siap. Karakter ditambahkan otomatis dalam satu menit setelah membayar.",
+        "premium_pay_button": "Bayar dengan Stripe",
+        "premium_unavailable": "Pembelian belum tersedia.",
+        "premium_error": "⚠️ Halaman pembayaran tidak dapat dibuka. Coba lagi sebentar lagi.",
+        "premium_granted_dm": "✅ Terima kasih! **{chars}** karakter telah ditambahkan ke saldo Translator-mu. Berlaku sampai {expiry}.",
     },
     "th": {
         "no_language_set": "🌐 **ยังไม่ได้ตั้งค่าภาษา**",
@@ -2169,6 +2447,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 คุณใช้ตัวอักษรครบแล้ว ตัวอักษรฟรีจะรีเซ็ต{reset} ต้องการเพิ่มตอนนี้? ใช้ `/premium`",
         "quota_not_enough": "📊 ข้อความนี้มี {needed} ตัวอักษร แต่คุณเหลือเพียง {available} ตัวอักษรฟรีจะรีเซ็ต{reset} ต้องการเพิ่มตอนนี้? ใช้ `/premium`",
         "quota_unavailable": "⚠️ ไม่สามารถตรวจสอบยอดตัวอักษรของคุณได้ โปรดลองอีกครั้งในอีกสักครู่",
+        "premium_title": "💎 **ตัวอักษร Translator ของคุณ**",
+        "premium_free_line": "ฟรีเดือนนี้: เหลือ **{left}** จาก {limit} · รีเซ็ต{reset}",
+        "premium_packs_line": "แพ็ก: เหลือ **{left}** · หมดอายุถัดไป {expiry}",
+        "premium_no_packs": "แพ็ก: ไม่มี",
+        "premium_buy_prompt": "ต้องการเพิ่ม? ซื้อแพ็ก: ชำระครั้งเดียว ใช้ได้ 60 วัน ไม่มีการสมัครสมาชิก",
+        "premium_pack_button": "{chars} ตัวอักษร · {price}",
+        "premium_checkout_ready": "หน้าชำระเงินพร้อมแล้ว ตัวอักษรจะถูกเพิ่มให้อัตโนมัติภายในหนึ่งนาทีหลังชำระเงิน",
+        "premium_pay_button": "ชำระด้วย Stripe",
+        "premium_unavailable": "ยังไม่เปิดให้ซื้อ",
+        "premium_error": "⚠️ ไม่สามารถเปิดหน้าชำระเงินได้ โปรดลองอีกครั้งในอีกสักครู่",
+        "premium_granted_dm": "✅ ขอบคุณ! เพิ่ม **{chars}** ตัวอักษรในยอด Translator ของคุณแล้ว ใช้ได้ถึง {expiry}",
     },
     "cs": {
         "no_language_set": "🌐 **Jazyk Není Nastaven**",
@@ -2197,6 +2486,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Vyčerpal jsi všechny znaky. Bezplatné znaky se obnoví {reset}. Potřebuješ další hned? Použij `/premium`.",
         "quota_not_enough": "📊 Tato zpráva má {needed} znaků, ale zbývá ti jen {available}. Bezplatné znaky se obnoví {reset}. Potřebuješ další hned? Použij `/premium`.",
         "quota_unavailable": "⚠️ Zůstatek znaků se nepodařilo ověřit. Zkus to znovu za chvíli.",
+        "premium_title": "💎 **Tvoje znaky Translator**",
+        "premium_free_line": "Zdarma tento měsíc: zbývá **{left}** z {limit} · obnovení {reset}",
+        "premium_packs_line": "Balíčky: zbývá **{left}** · nejbližší vypršení {expiry}",
+        "premium_no_packs": "Balíčky: žádné",
+        "premium_buy_prompt": "Potřebuješ víc? Kup si balíček: jednorázová platba, platí 60 dní, bez předplatného.",
+        "premium_pack_button": "{chars} znaků · {price}",
+        "premium_checkout_ready": "Platební stránka je připravená. Znaky se po zaplacení automaticky přidají do minuty.",
+        "premium_pay_button": "Zaplatit přes Stripe",
+        "premium_unavailable": "Nákupy zatím nejsou k dispozici.",
+        "premium_error": "⚠️ Platební stránku se nepodařilo otevřít. Zkus to znovu za chvíli.",
+        "premium_granted_dm": "✅ Děkujeme! Do tvého zůstatku Translator bylo přidáno **{chars}** znaků. Platí do {expiry}.",
     },
     "ro": {
         "no_language_set": "🌐 **Limba Nu Este Setată**",
@@ -2225,6 +2525,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Ai folosit toate caracterele. Caracterele gratuite se reînnoiesc {reset}. Ai nevoie de mai multe acum? Folosește `/premium`.",
         "quota_not_enough": "📊 Acest mesaj are {needed} caractere, dar mai ai doar {available}. Caracterele gratuite se reînnoiesc {reset}. Ai nevoie de mai multe acum? Folosește `/premium`.",
         "quota_unavailable": "⚠️ Nu am putut verifica soldul de caractere. Încearcă din nou peste câteva momente.",
+        "premium_title": "💎 **Caracterele tale Translator**",
+        "premium_free_line": "Gratuit luna aceasta: mai ai **{left}** din {limit} · se reînnoiesc {reset}",
+        "premium_packs_line": "Pachete: mai ai **{left}** · următoarea expirare {expiry}",
+        "premium_no_packs": "Pachete: niciunul",
+        "premium_buy_prompt": "Ai nevoie de mai multe? Cumpără un pachet: plată unică, valabil 60 de zile, fără abonament.",
+        "premium_pack_button": "{chars} caractere · {price}",
+        "premium_checkout_ready": "Pagina de plată este gata. Caracterele se adaugă automat în cel mult un minut după plată.",
+        "premium_pay_button": "Plătește cu Stripe",
+        "premium_unavailable": "Achizițiile nu sunt încă disponibile.",
+        "premium_error": "⚠️ Nu am putut deschide pagina de plată. Încearcă din nou peste câteva momente.",
+        "premium_granted_dm": "✅ Mulțumim! Au fost adăugate **{chars}** caractere în soldul tău Translator. Sunt valabile până la {expiry}.",
     },
     "bg": {
         "no_language_set": "🌐 **Езикът не е зададен**",
@@ -2255,6 +2566,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Използвахте всички символи. Безплатните символи се подновяват {reset}. Нужни са ви още сега? Използвайте `/premium`.",
         "quota_not_enough": "📊 Това съобщение има {needed} символа, а на вас са ви останали {available}. Безплатните символи се подновяват {reset}. Нужни са ви още сега? Използвайте `/premium`.",
         "quota_unavailable": "⚠️ Балансът на символите не можа да бъде проверен. Опитайте отново след малко.",
+        "premium_title": "💎 **Вашите символи в Translator**",
+        "premium_free_line": "Безплатно този месец: остават **{left}** от {limit} · подновяване {reset}",
+        "premium_packs_line": "Пакети: остават **{left}** · най-близко изтичане {expiry}",
+        "premium_no_packs": "Пакети: няма",
+        "premium_buy_prompt": "Нужни са ви още? Купете пакет: еднократно плащане, валиден 60 дни, без абонамент.",
+        "premium_pack_button": "{chars} символа · {price}",
+        "premium_checkout_ready": "Страницата за плащане е готова. Символите се добавят автоматично до минута след плащането.",
+        "premium_pay_button": "Плащане със Stripe",
+        "premium_unavailable": "Покупките все още не са налични.",
+        "premium_error": "⚠️ Страницата за плащане не можа да се отвори. Опитайте отново след малко.",
+        "premium_granted_dm": "✅ Благодарим ви! Към баланса ви в Translator са добавени **{chars}** символа. Валидни са до {expiry}.",
     },
     "hr": {
         "no_language_set": "🌐 **Jezik nije postavljen**",
@@ -2285,6 +2607,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Iskoristili ste sve znakove. Besplatni znakovi obnavljaju se {reset}. Trebate još odmah? Upotrijebite `/premium`.",
         "quota_not_enough": "📊 Ova poruka ima {needed} znakova, a preostalo vam je samo {available}. Besplatni znakovi obnavljaju se {reset}. Trebate još odmah? Upotrijebite `/premium`.",
         "quota_unavailable": "⚠️ Nije moguće provjeriti stanje znakova. Pokušajte ponovno za trenutak.",
+        "premium_title": "💎 **Vaši Translator znakovi**",
+        "premium_free_line": "Besplatno ovaj mjesec: preostalo **{left}** od {limit} · obnova {reset}",
+        "premium_packs_line": "Paketi: preostalo **{left}** · najbliže isteče {expiry}",
+        "premium_no_packs": "Paketi: nema",
+        "premium_buy_prompt": "Trebate još? Kupite paket: jednokratno plaćanje, vrijedi 60 dana, bez pretplate.",
+        "premium_pack_button": "{chars} znakova · {price}",
+        "premium_checkout_ready": "Stranica za plaćanje je spremna. Znakovi se automatski dodaju unutar minute nakon plaćanja.",
+        "premium_pay_button": "Plati putem Stripea",
+        "premium_unavailable": "Kupnje još nisu dostupne.",
+        "premium_error": "⚠️ Nije moguće otvoriti stranicu za plaćanje. Pokušajte ponovno za trenutak.",
+        "premium_granted_dm": "✅ Hvala! Vašem Translator stanju dodano je **{chars}** znakova. Vrijede do {expiry}.",
     },
     "da": {
         "no_language_set": "🌐 **Sprog ikke valgt**",
@@ -2315,6 +2648,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Du har brugt alle dine tegn. Gratis tegn fornyes {reset}. Har du brug for flere nu? Brug `/premium`.",
         "quota_not_enough": "📊 Denne besked har {needed} tegn, men du har kun {available} tilbage. Gratis tegn fornyes {reset}. Har du brug for flere nu? Brug `/premium`.",
         "quota_unavailable": "⚠️ Din tegnsaldo kunne ikke tjekkes. Prøv igen om lidt.",
+        "premium_title": "💎 **Dine Translator-tegn**",
+        "premium_free_line": "Gratis denne måned: **{left}** af {limit} tilbage · fornyes {reset}",
+        "premium_packs_line": "Pakker: **{left}** tilbage · næste udløb {expiry}",
+        "premium_no_packs": "Pakker: ingen",
+        "premium_buy_prompt": "Brug for flere? Køb en pakke: engangsbetaling, gyldig i 60 dage, intet abonnement.",
+        "premium_pack_button": "{chars} tegn · {price}",
+        "premium_checkout_ready": "Din betalingsside er klar. Tegnene tilføjes automatisk inden for et minut efter betaling.",
+        "premium_pay_button": "Betal med Stripe",
+        "premium_unavailable": "Køb er ikke tilgængelige endnu.",
+        "premium_error": "⚠️ Betalingssiden kunne ikke åbnes. Prøv igen om lidt.",
+        "premium_granted_dm": "✅ Tak! **{chars}** tegn er føjet til din Translator-saldo. De er gyldige til {expiry}.",
     },
     "el": {
         "no_language_set": "🌐 **Δεν έχει οριστεί γλώσσα**",
@@ -2345,6 +2689,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Έχετε χρησιμοποιήσει όλους τους χαρακτήρες σας. Οι δωρεάν χαρακτήρες ανανεώνονται {reset}. Χρειάζεστε περισσότερους τώρα; Χρησιμοποιήστε το `/premium`.",
         "quota_not_enough": "📊 Αυτό το μήνυμα έχει {needed} χαρακτήρες, αλλά σας απομένουν μόνο {available}. Οι δωρεάν χαρακτήρες ανανεώνονται {reset}. Χρειάζεστε περισσότερους τώρα; Χρησιμοποιήστε το `/premium`.",
         "quota_unavailable": "⚠️ Δεν ήταν δυνατός ο έλεγχος του υπολοίπου χαρακτήρων. Δοκιμάστε ξανά σε λίγο.",
+        "premium_title": "💎 **Οι χαρακτήρες σας στο Translator**",
+        "premium_free_line": "Δωρεάν αυτόν τον μήνα: απομένουν **{left}** από {limit} · ανανέωση {reset}",
+        "premium_packs_line": "Πακέτα: απομένουν **{left}** · επόμενη λήξη {expiry}",
+        "premium_no_packs": "Πακέτα: κανένα",
+        "premium_buy_prompt": "Χρειάζεστε περισσότερους; Αγοράστε ένα πακέτο: εφάπαξ πληρωμή, ισχύει 60 ημέρες, χωρίς συνδρομή.",
+        "premium_pack_button": "{chars} χαρακτήρες · {price}",
+        "premium_checkout_ready": "Η σελίδα πληρωμής είναι έτοιμη. Οι χαρακτήρες προστίθενται αυτόματα μέσα σε ένα λεπτό μετά την πληρωμή.",
+        "premium_pay_button": "Πληρωμή με Stripe",
+        "premium_unavailable": "Οι αγορές δεν είναι ακόμη διαθέσιμες.",
+        "premium_error": "⚠️ Δεν ήταν δυνατό να ανοίξει η σελίδα πληρωμής. Δοκιμάστε ξανά σε λίγο.",
+        "premium_granted_dm": "✅ Ευχαριστούμε! Προστέθηκαν **{chars}** χαρακτήρες στο υπόλοιπό σας στο Translator. Ισχύουν έως {expiry}.",
     },
     "hu": {
         "no_language_set": "🌐 **Nincs nyelv beállítva**",
@@ -2375,6 +2730,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Elhasználtad az összes karakteredet. Az ingyenes karakterek {reset} újulnak meg. Most kellene több? Használd a `/premium` parancsot.",
         "quota_not_enough": "📊 Ez az üzenet {needed} karakteres, de csak {available} karaktered maradt. Az ingyenes karakterek {reset} újulnak meg. Most kellene több? Használd a `/premium` parancsot.",
         "quota_unavailable": "⚠️ Nem sikerült ellenőrizni a karakteregyenlegedet. Próbáld újra egy kicsit később.",
+        "premium_title": "💎 **Translator karaktereid**",
+        "premium_free_line": "Ingyenes ebben a hónapban: **{left}** maradt a(z) {limit} karakterből · megújul {reset}",
+        "premium_packs_line": "Csomagok: **{left}** maradt · legközelebbi lejárat {expiry}",
+        "premium_no_packs": "Csomagok: nincs",
+        "premium_buy_prompt": "Több kell? Vegyél egy csomagot: egyszeri fizetés, 60 napig érvényes, előfizetés nélkül.",
+        "premium_pack_button": "{chars} karakter · {price}",
+        "premium_checkout_ready": "A fizetési oldal elkészült. A karaktereket a fizetés után egy percen belül automatikusan jóváírjuk.",
+        "premium_pay_button": "Fizetés Stripe-pal",
+        "premium_unavailable": "A vásárlás még nem érhető el.",
+        "premium_error": "⚠️ Nem sikerült megnyitni a fizetési oldalt. Próbáld újra egy kicsit később.",
+        "premium_granted_dm": "✅ Köszönjük! **{chars}** karaktert jóváírtunk a Translator egyenlegeden. {expiry}-ig érvényesek.",
     },
     "no": {
         "no_language_set": "🌐 **Språk er ikke valgt**",
@@ -2405,6 +2771,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Du har brukt alle tegnene dine. Gratis tegn fornyes {reset}. Trenger du flere nå? Bruk `/premium`.",
         "quota_not_enough": "📊 Denne meldingen har {needed} tegn, men du har bare {available} igjen. Gratis tegn fornyes {reset}. Trenger du flere nå? Bruk `/premium`.",
         "quota_unavailable": "⚠️ Kunne ikke sjekke tegnsaldoen din. Prøv igjen om litt.",
+        "premium_title": "💎 **Dine Translator-tegn**",
+        "premium_free_line": "Gratis denne måneden: **{left}** av {limit} igjen · fornyes {reset}",
+        "premium_packs_line": "Pakker: **{left}** igjen · neste utløp {expiry}",
+        "premium_no_packs": "Pakker: ingen",
+        "premium_buy_prompt": "Trenger du flere? Kjøp en pakke: engangsbetaling, gyldig i 60 dager, uten abonnement.",
+        "premium_pack_button": "{chars} tegn · {price}",
+        "premium_checkout_ready": "Betalingssiden din er klar. Tegnene legges til automatisk innen ett minutt etter betaling.",
+        "premium_pay_button": "Betal med Stripe",
+        "premium_unavailable": "Kjøp er ikke tilgjengelig ennå.",
+        "premium_error": "⚠️ Kunne ikke åpne betalingssiden. Prøv igjen om litt.",
+        "premium_granted_dm": "✅ Takk! **{chars}** tegn er lagt til Translator-saldoen din. De er gyldige til {expiry}.",
     },
     "fi": {
         "no_language_set": "🌐 **Kieltä ei ole asetettu**",
@@ -2435,6 +2812,17 @@ LOCALE_STRINGS = {
         "quota_limit_reached": "📊 Olet käyttänyt kaikki merkkisi. Ilmaiset merkit uusiutuvat {reset}. Tarvitsetko lisää heti? Käytä komentoa `/premium`.",
         "quota_not_enough": "📊 Tässä viestissä on {needed} merkkiä, mutta sinulla on jäljellä vain {available}. Ilmaiset merkit uusiutuvat {reset}. Tarvitsetko lisää heti? Käytä komentoa `/premium`.",
         "quota_unavailable": "⚠️ Merkkisaldoasi ei voitu tarkistaa. Yritä hetken kuluttua uudelleen.",
+        "premium_title": "💎 **Translator-merkkisi**",
+        "premium_free_line": "Ilmaiseksi tässä kuussa: jäljellä **{left}** / {limit} · uusiutuu {reset}",
+        "premium_packs_line": "Paketit: jäljellä **{left}** · seuraava vanheneminen {expiry}",
+        "premium_no_packs": "Paketit: ei yhtään",
+        "premium_buy_prompt": "Tarvitsetko lisää? Osta paketti: kertamaksu, voimassa 60 päivää, ei tilausta.",
+        "premium_pack_button": "{chars} merkkiä · {price}",
+        "premium_checkout_ready": "Maksusivusi on valmis. Merkit lisätään automaattisesti minuutin kuluessa maksusta.",
+        "premium_pay_button": "Maksa Stripellä",
+        "premium_unavailable": "Ostot eivät ole vielä käytettävissä.",
+        "premium_error": "⚠️ Maksusivua ei voitu avata. Yritä hetken kuluttua uudelleen.",
+        "premium_granted_dm": "✅ Kiitos! Translator-saldoosi lisättiin **{chars}** merkkiä. Ne ovat voimassa {expiry} asti.",
     },
 }
 
@@ -2453,6 +2841,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Įjunkite arba išjunkite vertimo mygtukus naujoms žinutėms šiame serveryje.",
         "Enable or disable translate buttons for a specific channel.": "Įjunkite arba išjunkite vertimo mygtukus konkrečiam kanalui.",
         "The channel to update": "Kanalas, kurį reikia atnaujinti",
+        "Check your character balance and buy more.": "Peržiūrėkite simbolių likutį ir įsigykite daugiau.",
         "On": "Įjungta",
         "Off": "Išjungta",
     },
@@ -2468,6 +2857,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Aktiviere oder deaktiviere Übersetzungsbuttons für neue Nachrichten auf diesem Server.",
         "Enable or disable translate buttons for a specific channel.": "Aktiviere oder deaktiviere Übersetzungsbuttons für einen bestimmten Kanal.",
         "The channel to update": "Zu aktualisierender Kanal",
+        "Check your character balance and buy more.": "Sieh dein Zeichenguthaben an und kauf mehr.",
         "On": "Ein",
         "Off": "Aus",
     },
@@ -2483,6 +2873,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Activa o desactiva los botones de traducción en nuevos mensajes de este servidor.",
         "Enable or disable translate buttons for a specific channel.": "Activa o desactiva los botones de traducción para un canal específico.",
         "The channel to update": "Canal a actualizar",
+        "Check your character balance and buy more.": "Consulta tu saldo de caracteres y compra más.",
         "On": "Activado",
         "Off": "Desactivado",
     },
@@ -2498,6 +2889,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Activez ou désactivez les boutons de traduction sur les nouveaux messages de ce serveur.",
         "Enable or disable translate buttons for a specific channel.": "Activez ou désactivez les boutons de traduction pour un canal spécifique.",
         "The channel to update": "Canal à mettre à jour",
+        "Check your character balance and buy more.": "Consultez votre solde de caractères et achetez-en plus.",
         "On": "Activé",
         "Off": "Désactivé",
     },
@@ -2513,6 +2905,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Ative ou desative botões de tradução em novas mensagens neste servidor.",
         "Enable or disable translate buttons for a specific channel.": "Ative ou desative botões de tradução para um canal específico.",
         "The channel to update": "Canal para atualizar",
+        "Check your character balance and buy more.": "Veja seu saldo de caracteres e compre mais.",
         "On": "Ativado",
         "Off": "Desativado",
     },
@@ -2528,6 +2921,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Aktivera eller inaktivera översättningsknappar för nya meddelanden på den här servern.",
         "Enable or disable translate buttons for a specific channel.": "Aktivera eller inaktivera översättningsknappar för en viss kanal.",
         "The channel to update": "Kanal att uppdatera",
+        "Check your character balance and buy more.": "Se ditt teckensaldo och köp fler.",
         "On": "På",
         "Off": "Av",
     },
@@ -2543,6 +2937,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "このサーバーの新しいメッセージで翻訳ボタンを有効または無効にします。",
         "Enable or disable translate buttons for a specific channel.": "特定のチャンネルの翻訳ボタンを有効または無効にします。",
         "The channel to update": "更新するチャンネル",
+        "Check your character balance and buy more.": "文字数の残高を確認して追加購入します。",
         "On": "オン",
         "Off": "オフ",
     },
@@ -2558,6 +2953,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "在此服务器中新消息上启用或禁用翻译按钮。",
         "Enable or disable translate buttons for a specific channel.": "为特定频道启用或禁用翻译按钮。",
         "The channel to update": "要更新的频道",
+        "Check your character balance and buy more.": "查看你的字符余额并购买更多。",
         "On": "开启",
         "Off": "关闭",
     },
@@ -2573,6 +2969,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "在此伺服器的新訊息上啟用或停用翻譯按鈕。",
         "Enable or disable translate buttons for a specific channel.": "為特定頻道啟用或停用翻譯按鈕。",
         "The channel to update": "要更新的頻道",
+        "Check your character balance and buy more.": "查看您的字元餘額並購買更多。",
         "On": "開啟",
         "Off": "關閉",
     },
@@ -2588,6 +2985,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "이 서버의 새 메시지에 번역 버튼을 활성화 또는 비활성화합니다.",
         "Enable or disable translate buttons for a specific channel.": "특정 채널의 번역 버튼을 활성화 또는 비활성화합니다.",
         "The channel to update": "업데이트할 채널",
+        "Check your character balance and buy more.": "글자 잔액을 확인하고 더 구매하세요.",
         "On": "켜기",
         "Off": "끄기",
     },
@@ -2603,6 +3001,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Abilita o disabilita i pulsanti di traduzione sui nuovi messaggi in questo server.",
         "Enable or disable translate buttons for a specific channel.": "Abilita o disabilita i pulsanti di traduzione per un canale specifico.",
         "The channel to update": "Canale da aggiornare",
+        "Check your character balance and buy more.": "Controlla il tuo saldo di caratteri e acquistane altri.",
         "On": "Attivo",
         "Off": "Disattivo",
     },
@@ -2618,6 +3017,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Schakel vertaalbuttons in of uit voor nieuwe berichten in deze server.",
         "Enable or disable translate buttons for a specific channel.": "Schakel vertaalbuttons in of uit voor een specifiek kanaal.",
         "The channel to update": "Kanaal om bij te werken",
+        "Check your character balance and buy more.": "Bekijk je tekensaldo en koop er meer.",
         "On": "Aan",
         "Off": "Uit",
     },
@@ -2633,6 +3033,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Bật hoặc tắt nút dịch cho tin nhắn mới trong máy chủ này.",
         "Enable or disable translate buttons for a specific channel.": "Bật hoặc tắt nút dịch cho một kênh cụ thể.",
         "The channel to update": "Kênh cần cập nhật",
+        "Check your character balance and buy more.": "Xem số dư ký tự và mua thêm.",
         "On": "Bật",
         "Off": "Tắt",
     },
@@ -2648,6 +3049,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "I-enable o i-disable ang mga translate button sa mga bagong mensahe sa server na ito.",
         "Enable or disable translate buttons for a specific channel.": "I-enable o i-disable ang mga translate button para sa isang partikular na channel.",
         "The channel to update": "Channel na ia-update",
+        "Check your character balance and buy more.": "Tingnan ang iyong character balance at bumili pa.",
         "On": "Naka-on",
         "Off": "Naka-off",
     },
@@ -2663,6 +3065,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Włącz lub wyłącz przyciski tłumaczenia dla nowych wiadomości na tym serwerze.",
         "Enable or disable translate buttons for a specific channel.": "Włącz lub wyłącz przyciski tłumaczenia dla wybranego kanału.",
         "The channel to update": "Kanał do zaktualizowania",
+        "Check your character balance and buy more.": "Sprawdź saldo znaków i kup więcej.",
         "On": "Włącz",
         "Off": "Wyłącz",
     },
@@ -2678,6 +3081,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Включите или отключите кнопки перевода для новых сообщений на этом сервере.",
         "Enable or disable translate buttons for a specific channel.": "Включите или отключите кнопки перевода для конкретного канала.",
         "The channel to update": "Канал для обновления",
+        "Check your character balance and buy more.": "Проверьте баланс символов и купите ещё.",
         "On": "Вкл",
         "Off": "Выкл",
     },
@@ -2693,6 +3097,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Увімкніть або вимкніть кнопки перекладу для нових повідомлень на цьому сервері.",
         "Enable or disable translate buttons for a specific channel.": "Увімкніть або вимкніть кнопки перекладу для певного каналу.",
         "The channel to update": "Канал для оновлення",
+        "Check your character balance and buy more.": "Перевірте баланс символів і придбайте ще.",
         "On": "Увімкнено",
         "Off": "Вимкнено",
     },
@@ -2708,6 +3113,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "تفعيل أو تعطيل أزرار الترجمة للرسائل الجديدة في هذا الخادم.",
         "Enable or disable translate buttons for a specific channel.": "تفعيل أو تعطيل أزرار الترجمة لقناة محددة.",
         "The channel to update": "القناة المراد تحديثها",
+        "Check your character balance and buy more.": "تحقق من رصيد الأحرف واشترِ المزيد.",
         "On": "تشغيل",
         "Off": "إيقاف",
     },
@@ -2723,6 +3129,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "इस सर्वर में नए संदेशों पर अनुवाद बटन चालू या बंद करें।",
         "Enable or disable translate buttons for a specific channel.": "किसी विशेष चैनल के लिए अनुवाद बटन चालू या बंद करें।",
         "The channel to update": "अपडेट करने के लिए चैनल",
+        "Check your character balance and buy more.": "अपना कैरेक्टर बैलेंस देखें और और खरीदें।",
         "On": "चालू",
         "Off": "बंद",
     },
@@ -2738,6 +3145,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Bu sunucudaki yeni mesajlarda çeviri düğmelerini etkinleştirin veya devre dışı bırakın.",
         "Enable or disable translate buttons for a specific channel.": "Belirli bir kanal için çeviri düğmelerini etkinleştirin veya devre dışı bırakın.",
         "The channel to update": "Güncellenecek kanal",
+        "Check your character balance and buy more.": "Karakter bakiyeni gör ve daha fazlasını satın al.",
         "On": "Açık",
         "Off": "Kapalı",
     },
@@ -2753,6 +3161,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Aktifkan atau nonaktifkan tombol terjemahan pada pesan baru di server ini.",
         "Enable or disable translate buttons for a specific channel.": "Aktifkan atau nonaktifkan tombol terjemahan untuk channel tertentu.",
         "The channel to update": "Channel yang diperbarui",
+        "Check your character balance and buy more.": "Lihat saldo karaktermu dan beli lagi.",
         "On": "Aktif",
         "Off": "Nonaktif",
     },
@@ -2768,6 +3177,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "เปิดหรือปิดปุ่มแปลสำหรับข้อความใหม่ในเซิร์ฟเวอร์นี้",
         "Enable or disable translate buttons for a specific channel.": "เปิดหรือปิดปุ่มแปลสำหรับช่องที่ระบุ",
         "The channel to update": "ช่องที่จะอัปเดต",
+        "Check your character balance and buy more.": "ดูยอดตัวอักษรและซื้อเพิ่ม",
         "On": "เปิด",
         "Off": "ปิด",
     },
@@ -2783,6 +3193,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Povolte nebo zakažte tlačítka překladu u nových zpráv na tomto serveru.",
         "Enable or disable translate buttons for a specific channel.": "Povolte nebo zakažte tlačítka překladu pro konkrétní kanál.",
         "The channel to update": "Kanál k aktualizaci",
+        "Check your character balance and buy more.": "Zkontroluj zůstatek znaků a kup si další.",
         "On": "Zapnuto",
         "Off": "Vypnuto",
     },
@@ -2798,6 +3209,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Activați sau dezactivați butoanele de traducere pentru mesajele noi de pe acest server.",
         "Enable or disable translate buttons for a specific channel.": "Activați sau dezactivați butoanele de traducere pentru un canal specific.",
         "The channel to update": "Canalul de actualizat",
+        "Check your character balance and buy more.": "Vezi soldul de caractere și cumpără mai multe.",
         "On": "Pornit",
         "Off": "Oprit",
     },
@@ -2813,6 +3225,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Включете или изключете бутоните за превод под новите съобщения в този сървър.",
         "Enable or disable translate buttons for a specific channel.": "Включете или изключете бутоните за превод за конкретен канал.",
         "The channel to update": "Каналът за промяна",
+        "Check your character balance and buy more.": "Проверете баланса на символите и купете още.",
         "On": "Вкл.",
         "Off": "Изкл.",
     },
@@ -2828,6 +3241,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Uključite ili isključite gumbe za prijevod na novim porukama na ovom poslužitelju.",
         "Enable or disable translate buttons for a specific channel.": "Uključite ili isključite gumbe za prijevod za određeni kanal.",
         "The channel to update": "Kanal koji treba ažurirati",
+        "Check your character balance and buy more.": "Provjerite stanje znakova i kupite još.",
         "On": "Uključeno",
         "Off": "Isključeno",
     },
@@ -2843,6 +3257,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Slå oversættelsesknapper til eller fra på nye beskeder på denne server.",
         "Enable or disable translate buttons for a specific channel.": "Slå oversættelsesknapper til eller fra for en bestemt kanal.",
         "The channel to update": "Kanalen, der skal opdateres",
+        "Check your character balance and buy more.": "Se din tegnsaldo, og køb flere.",
         "On": "Til",
         "Off": "Fra",
     },
@@ -2858,6 +3273,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Ενεργοποίηση ή απενεργοποίηση κουμπιών μετάφρασης σε νέα μηνύματα σε αυτόν τον διακομιστή.",
         "Enable or disable translate buttons for a specific channel.": "Ενεργοποίηση ή απενεργοποίηση κουμπιών μετάφρασης για ένα συγκεκριμένο κανάλι.",
         "The channel to update": "Το κανάλι προς ενημέρωση",
+        "Check your character balance and buy more.": "Δείτε το υπόλοιπο χαρακτήρων σας και αγοράστε περισσότερους.",
         "On": "Ενεργό",
         "Off": "Ανενεργό",
     },
@@ -2873,6 +3289,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Fordítás gombok be- vagy kikapcsolása az új üzeneteknél ezen a szerveren.",
         "Enable or disable translate buttons for a specific channel.": "Fordítás gombok be- vagy kikapcsolása egy adott csatornában.",
         "The channel to update": "A módosítandó csatorna",
+        "Check your character balance and buy more.": "Nézd meg a karakteregyenlegedet, és vásárolj többet.",
         "On": "Be",
         "Off": "Ki",
     },
@@ -2888,6 +3305,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Slå oversettelsesknapper på eller av for nye meldinger på denne serveren.",
         "Enable or disable translate buttons for a specific channel.": "Slå oversettelsesknapper på eller av for en bestemt kanal.",
         "The channel to update": "Kanalen som skal oppdateres",
+        "Check your character balance and buy more.": "Se tegnsaldoen din og kjøp flere.",
         "On": "På",
         "Off": "Av",
     },
@@ -2903,6 +3321,7 @@ COMMAND_TEXT_LOCALIZATIONS = {
         "Enable or disable translate buttons on new messages in this server.": "Ota käännöspainikkeet käyttöön tai pois käytöstä uusissa viesteissä tällä palvelimella.",
         "Enable or disable translate buttons for a specific channel.": "Ota käännöspainikkeet käyttöön tai pois käytöstä tietyllä kanavalla.",
         "The channel to update": "Päivitettävä kanava",
+        "Check your character balance and buy more.": "Tarkista merkkisaldosi ja osta lisää.",
         "On": "Päällä",
         "Off": "Pois",
     },
@@ -3482,6 +3901,107 @@ async def set_language(interaction: discord.Interaction, choice: app_commands.Ch
         message_template.format(language=choice.name),
         ephemeral=True,
     )
+
+
+def format_premium_balance(locale, balance: "user_quota.QuotaBalance") -> str:
+    """Localized /premium text: free allowance this month + pack balance."""
+    lines = [get_localized_string(locale, "premium_title", "💎 **Your Translator characters**")]
+    lines.append(get_localized_string(
+        locale, "premium_free_line",
+        "Free this month: **{left}** of {limit} left · renews {reset}",
+    ).format(
+        left=f"{balance.free_left:,}",
+        limit=f"{user_quota.DEFAULT_USER_MONTHLY_CHARACTER_LIMIT:,}",
+        reset=f"<t:{user_quota.next_free_reset_timestamp()}:R>",
+    ))
+    if balance.packs_left > 0 and balance.next_expiry:
+        expiry = int(datetime.fromisoformat(balance.next_expiry).timestamp())
+        lines.append(get_localized_string(
+            locale, "premium_packs_line", "Packs: **{left}** left · next expiry {expiry}",
+        ).format(left=f"{balance.packs_left:,}", expiry=f"<t:{expiry}:D>"))
+    else:
+        lines.append(get_localized_string(locale, "premium_no_packs", "Packs: none"))
+    return "\n".join(lines)
+
+
+class PremiumBuyButton(discord.ui.Button):
+    def __init__(self, pack: "stripe_payments.Pack", locale):
+        label = get_localized_string(
+            locale, "premium_pack_button", "{chars} characters · {price}",
+        ).format(chars=f"{pack.chars:,}", price=pack.price_label)
+        style = discord.ButtonStyle.success if pack.code == "large" else discord.ButtonStyle.primary
+        super().__init__(label=label[:80], style=style, custom_id=f"premium_buy:{pack.code}")
+        self.pack = pack
+
+    async def callback(self, interaction: discord.Interaction):
+        locale = interaction.locale
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            url = await asyncio.to_thread(
+                stripe_payments.create_checkout_session_sync,
+                interaction.user.id, self.pack.code, str(locale or ""),
+            )
+        except Exception as exc:
+            log("Payments", f"checkout failed for user {interaction.user.id}: {exc}")
+            await send_response(
+                interaction,
+                content=get_localized_string(
+                    locale, "premium_error",
+                    "⚠️ Couldn't open the payment page. Please try again in a moment.",
+                ),
+                ephemeral=True,
+            )
+            return
+        log("Payments", f"checkout opened: {self.pack.code} pack for user {interaction.user.id}")
+        pay_view = discord.ui.View()
+        pay_view.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            url=url,
+            label=get_localized_string(locale, "premium_pay_button", "Pay with Stripe"),
+        ))
+        await send_response(
+            interaction,
+            content=get_localized_string(
+                locale, "premium_checkout_ready",
+                "Your payment page is ready. Characters are added automatically within a minute after you pay.",
+            ),
+            view=pay_view,
+            ephemeral=True,
+        )
+
+
+class PremiumView(discord.ui.View):
+    def __init__(self, locale):
+        super().__init__(timeout=600)
+        for pack in stripe_payments.PACKS.values():
+            self.add_item(PremiumBuyButton(pack, locale))
+
+
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@client.tree.command(name="premium", description="Check your character balance and buy more.")
+async def premium_command(interaction: discord.Interaction):
+    locale = interaction.locale
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception as defer_error:
+        log("Payments", f"/premium defer failed: {defer_error}")
+    balance = await user_quota.get_user_balance_async(interaction.user.id, use_cache=False)
+    if balance is None:
+        await send_response(interaction, content=format_quota_denial(locale, None), ephemeral=True)
+        return
+
+    content = format_premium_balance(locale, balance)
+    if not stripe_payments.stripe_is_configured():
+        content += "\n\n" + get_localized_string(locale, "premium_unavailable", "Purchases aren't available yet.")
+        await send_response(interaction, content=content, ephemeral=True)
+        return
+
+    content += "\n\n" + get_localized_string(
+        locale, "premium_buy_prompt",
+        "Need more? Buy a pack: one-time payment, valid 60 days, no subscription.",
+    )
+    await send_response(interaction, content=content, view=PremiumView(locale), ephemeral=True)
 
 
 # 2. Command: Enable or disable auto translate buttons on new messages
