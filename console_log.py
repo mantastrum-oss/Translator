@@ -37,10 +37,12 @@ TAG_COLORS = {
     "Quota": "\033[93m",
     "Storage": "\033[94m",
     "Blocks": "\033[91m",
+    "Payments": "\033[92m",
 }
 LOGGER_TAGS = {
     "TranslationCopilot": "Translate",
     "UserQuota": "Quota",
+    "Payments": "Payments",
     "discord.client": "Discord",
     "discord.gateway": "Discord",
     "discord.http": "Discord",
