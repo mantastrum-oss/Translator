@@ -884,9 +884,14 @@ async def translate_text_async(text: str, target_lang: str, user_id: int, user_l
         # Error messages from the resilient translator start with ⚠️ or ⏳
         if not translated.startswith("⚠️") and not translated.startswith("⏳"):
             # Only successful translations are deducted (free allowance first, then packs)
-            if not await record_user_usage_async(user_id, char_count):
+            usage = await record_user_usage_async(user_id, char_count)
+            if not usage:
                 # Recording failed; log but don't block the translation
                 log("Quota", f"failed to record usage for user {user_id}")
+            elif getattr(usage, "warning_percent", None):
+                # Shown under this translation by append_quota_warning
+                quota_usage_warnings[user_id] = (usage.warning_percent, usage.free_left)
+                log("Quota", f"user {user_id} passed {usage.warning_percent}% of free characters")
         
         # Put protected parts back (skip for error strings)
         if translated.startswith("⚠️") or translated.startswith("⏳"):
@@ -962,6 +967,32 @@ async def check_translation_quota(
     return decision.allowed, decision
 
 
+# user_id -> (percent used, free chars left): set by translate_text_async when a
+# translation crosses a warning point, consumed by append_quota_warning.
+quota_usage_warnings: dict[int, tuple[int, int]] = {}
+
+
+def append_quota_warning(interaction: discord.Interaction, content: str) -> str:
+    """Add a small "you've used N% of free characters" line under a translation, once."""
+    warning = quota_usage_warnings.pop(getattr(interaction.user, "id", None), None)
+    if not warning:
+        return content
+    percent, left = warning
+    if percent >= 100:
+        # Free allowance just ran out: same text the next (blocked) translation would show
+        return f"{content}\n-# {format_quota_denial(interaction.locale, QuotaDecision(False, user_quota.REASON_LIMIT_REACHED))}"
+    line = get_localized_string(
+        interaction.locale, "quota_usage_warning",
+        "📊 You've used {percent}% of this month's free characters ({left} left). "
+        "They renew {reset}. Need more? `/premium`",
+    ).format(
+        percent=percent,
+        left=f"{left:,}",
+        reset=f"<t:{user_quota.next_free_reset_timestamp()}:R>",
+    )
+    return f"{content}\n-# {line}"
+
+
 def format_quota_denial(locale, decision: QuotaDecision | None) -> str:
     """Localized message for a denied translation."""
     reason = getattr(decision, "reason", None)
@@ -971,12 +1002,6 @@ def format_quota_denial(locale, decision: QuotaDecision | None) -> str:
             "⚠️ Couldn't check your character balance. Please try again in a moment.",
         )
     reset = f"<t:{user_quota.next_free_reset_timestamp()}:R>"
-    if reason == user_quota.REASON_NOT_ENOUGH:
-        return get_localized_string(
-            locale, "quota_not_enough",
-            "📊 This message has {needed} characters, but you have {available} left. "
-            "Free characters renew {reset}. Need more now? Use `/premium`.",
-        ).format(needed=f"{decision.needed:,}", available=f"{decision.available:,}", reset=reset)
     return get_localized_string(
         locale, "quota_limit_reached",
         "📊 You've used all your characters. Free characters renew {reset}. "
@@ -1526,8 +1551,8 @@ LOCALE_STRINGS = {
         "admin_required": "You must be a server administrator to change this setting.",
         "server_only": "This command can only be used in a server.",
         "quota_limit_reached": "📊 You've used all your characters. Free characters renew {reset}. Need more now? Use `/premium`.",
-        "quota_not_enough": "📊 This message has {needed} characters, but you have {available} left. Free characters renew {reset}. Need more now? Use `/premium`.",
         "quota_unavailable": "⚠️ Couldn't check your character balance. Please try again in a moment.",
+        "quota_usage_warning": "📊 You've used {percent}% of this month's free characters ({left} left). They renew {reset}. Need more? `/premium`",
         "premium_title": "💎 **Your Translator characters**",
         "premium_free_line": "Free this month: **{left}** of {limit} left · renews {reset}",
         "premium_packs_line": "Packs: **{left}** left · next expiry {expiry}",
@@ -1567,8 +1592,8 @@ LOCALE_STRINGS = {
         "admin_required": "You must be a server administrator to change this setting.",
         "server_only": "This command can only be used in a server.",
         "quota_limit_reached": "📊 You've used all your characters. Free characters renew {reset}. Need more now? Use `/premium`.",
-        "quota_not_enough": "📊 This message has {needed} characters, but you have {available} left. Free characters renew {reset}. Need more now? Use `/premium`.",
         "quota_unavailable": "⚠️ Couldn't check your character balance. Please try again in a moment.",
+        "quota_usage_warning": "📊 You've used {percent}% of this month's free characters ({left} left). They renew {reset}. Need more? `/premium`",
         "premium_title": "💎 **Your Translator characters**",
         "premium_free_line": "Free this month: **{left}** of {limit} left · renews {reset}",
         "premium_packs_line": "Packs: **{left}** left · next expiry {expiry}",
@@ -1608,8 +1633,8 @@ LOCALE_STRINGS = {
         "admin_required": "Turite būti serverio administratorius, kad pakeistumėte šį nustatymą.",
         "server_only": "Šią komandą galima naudoti tik serveryje.",
         "quota_limit_reached": "📊 Išnaudojote visus simbolius. Nemokami simboliai atsinaujins {reset}. Reikia daugiau dabar? Naudokite `/premium`.",
-        "quota_not_enough": "📊 Šioje žinutėje yra {needed} simbolių, o jums liko {available}. Nemokami simboliai atsinaujins {reset}. Reikia daugiau dabar? Naudokite `/premium`.",
         "quota_unavailable": "⚠️ Nepavyko patikrinti simbolių likučio. Pabandykite po akimirkos.",
+        "quota_usage_warning": "📊 Išnaudojote {percent}% šio mėnesio nemokamų simbolių (liko {left}). Jie atsinaujins {reset}. Reikia daugiau? `/premium`",
         "premium_title": "💎 **Jūsų Translator simboliai**",
         "premium_free_line": "Nemokamai šį mėnesį: liko **{left}** iš {limit} · atsinaujins {reset}",
         "premium_packs_line": "Paketai: liko **{left}** · artimiausias baigiasi {expiry}",
@@ -1649,8 +1674,8 @@ LOCALE_STRINGS = {
         "admin_required": "Du musst ein Serveradministrator sein, um diese Einstellung zu ändern.",
         "server_only": "Dieser Befehl kann nur auf einem Server verwendet werden.",
         "quota_limit_reached": "📊 Du hast alle deine Zeichen verbraucht. Kostenlose Zeichen werden {reset} erneuert. Brauchst du jetzt mehr? Nutze `/premium`.",
-        "quota_not_enough": "📊 Diese Nachricht hat {needed} Zeichen, du hast aber nur noch {available}. Kostenlose Zeichen werden {reset} erneuert. Brauchst du jetzt mehr? Nutze `/premium`.",
         "quota_unavailable": "⚠️ Dein Zeichenguthaben konnte nicht geprüft werden. Versuch es gleich noch einmal.",
+        "quota_usage_warning": "📊 Du hast {percent}% deiner kostenlosen Zeichen für diesen Monat verbraucht (noch {left}). Sie werden {reset} erneuert. Brauchst du mehr? `/premium`",
         "premium_title": "💎 **Deine Translator-Zeichen**",
         "premium_free_line": "Kostenlos diesen Monat: **{left}** von {limit} übrig · erneuert {reset}",
         "premium_packs_line": "Pakete: **{left}** übrig · nächster Ablauf {expiry}",
@@ -1690,8 +1715,8 @@ LOCALE_STRINGS = {
         "admin_required": "Debes ser administrador del servidor para cambiar esta configuración.",
         "server_only": "Este comando solo puede utilizarse en un servidor.",
         "quota_limit_reached": "📊 Has usado todos tus caracteres. Los caracteres gratuitos se renuevan {reset}. ¿Necesitas más ahora? Usa `/premium`.",
-        "quota_not_enough": "📊 Este mensaje tiene {needed} caracteres, pero solo te quedan {available}. Los caracteres gratuitos se renuevan {reset}. ¿Necesitas más ahora? Usa `/premium`.",
         "quota_unavailable": "⚠️ No se pudo comprobar tu saldo de caracteres. Inténtalo de nuevo en un momento.",
+        "quota_usage_warning": "📊 Has usado el {percent}% de tus caracteres gratuitos de este mes (te quedan {left}). Se renuevan {reset}. ¿Necesitas más? `/premium`",
         "premium_title": "💎 **Tus caracteres de Translator**",
         "premium_free_line": "Gratis este mes: te quedan **{left}** de {limit} · se renuevan {reset}",
         "premium_packs_line": "Paquetes: quedan **{left}** · próximo vencimiento {expiry}",
@@ -1731,8 +1756,8 @@ LOCALE_STRINGS = {
         "admin_required": "Vous devez être administrateur du serveur pour modifier ce paramètre.",
         "server_only": "Cette commande ne peut être utilisée que sur un serveur.",
         "quota_limit_reached": "📊 Vous avez utilisé tous vos caractères. Les caractères gratuits se renouvellent {reset}. Besoin de plus maintenant ? Utilisez `/premium`.",
-        "quota_not_enough": "📊 Ce message contient {needed} caractères, mais il ne vous en reste que {available}. Les caractères gratuits se renouvellent {reset}. Besoin de plus maintenant ? Utilisez `/premium`.",
         "quota_unavailable": "⚠️ Impossible de vérifier votre solde de caractères. Réessayez dans un instant.",
+        "quota_usage_warning": "📊 Vous avez utilisé {percent} % de vos caractères gratuits ce mois-ci (il en reste {left}). Ils se renouvellent {reset}. Besoin de plus ? `/premium`",
         "premium_title": "💎 **Vos caractères Translator**",
         "premium_free_line": "Gratuits ce mois-ci : **{left}** sur {limit} restants · renouvellement {reset}",
         "premium_packs_line": "Packs : **{left}** restants · prochaine expiration {expiry}",
@@ -1772,8 +1797,8 @@ LOCALE_STRINGS = {
         "admin_required": "Você deve ser um administrador do servidor para alterar essa configuração.",
         "server_only": "Este comando só pode ser usado em um servidor.",
         "quota_limit_reached": "📊 Você usou todos os seus caracteres. Os caracteres gratuitos são renovados {reset}. Precisa de mais agora? Use `/premium`.",
-        "quota_not_enough": "📊 Esta mensagem tem {needed} caracteres, mas você só tem {available}. Os caracteres gratuitos são renovados {reset}. Precisa de mais agora? Use `/premium`.",
         "quota_unavailable": "⚠️ Não foi possível verificar seu saldo de caracteres. Tente novamente em instantes.",
+        "quota_usage_warning": "📊 Você usou {percent}% dos seus caracteres gratuitos deste mês (restam {left}). Eles são renovados {reset}. Precisa de mais? `/premium`",
         "premium_title": "💎 **Seus caracteres do Translator**",
         "premium_free_line": "Grátis este mês: restam **{left}** de {limit} · renova {reset}",
         "premium_packs_line": "Pacotes: restam **{left}** · próximo vencimento {expiry}",
@@ -1813,8 +1838,8 @@ LOCALE_STRINGS = {
         "admin_required": "Du måste vara serveradministratör för att ändra denna inställning.",
         "server_only": "Det här kommandot kan bara användas på en server.",
         "quota_limit_reached": "📊 Du har använt alla dina tecken. Gratistecken förnyas {reset}. Behöver du fler nu? Använd `/premium`.",
-        "quota_not_enough": "📊 Det här meddelandet har {needed} tecken, men du har bara {available} kvar. Gratistecken förnyas {reset}. Behöver du fler nu? Använd `/premium`.",
         "quota_unavailable": "⚠️ Det gick inte att kontrollera ditt teckensaldo. Försök igen om en stund.",
+        "quota_usage_warning": "📊 Du har använt {percent} % av månadens gratistecken ({left} kvar). De förnyas {reset}. Behöver du fler? `/premium`",
         "premium_title": "💎 **Dina Translator-tecken**",
         "premium_free_line": "Gratis denna månad: **{left}** av {limit} kvar · förnyas {reset}",
         "premium_packs_line": "Paket: **{left}** kvar · nästa utgång {expiry}",
@@ -1854,8 +1879,8 @@ LOCALE_STRINGS = {
         "admin_required": "この設定を変更するにはサーバー管理者である必要があります。",
         "server_only": "このコマンドはサーバーでのみ使用できます。",
         "quota_limit_reached": "📊 文字数をすべて使い切りました。無料の文字数は{reset}にリセットされます。今すぐ追加するには `/premium` を使ってください。",
-        "quota_not_enough": "📊 このメッセージは{needed}文字ですが、残りは{available}文字です。無料の文字数は{reset}にリセットされます。今すぐ追加するには `/premium` を使ってください。",
         "quota_unavailable": "⚠️ 文字数の残高を確認できませんでした。しばらくしてからもう一度お試しください。",
+        "quota_usage_warning": "📊 今月の無料文字数の{percent}%を使用しました（残り{left}文字）。{reset}にリセットされます。もっと必要なら `/premium`",
         "premium_title": "💎 **Translator の文字数**",
         "premium_free_line": "今月の無料分：残り **{left}** / {limit} · {reset}にリセット",
         "premium_packs_line": "パック：残り **{left}** · 次の有効期限 {expiry}",
@@ -1895,8 +1920,8 @@ LOCALE_STRINGS = {
         "admin_required": "您必须是服务器管理员才能更改此设置。",
         "server_only": "此命令只能在服务器中使用。",
         "quota_limit_reached": "📊 你的字符已全部用完。免费字符将于{reset}重置。现在需要更多？请使用 `/premium`。",
-        "quota_not_enough": "📊 这条消息有 {needed} 个字符，但你只剩 {available} 个。免费字符将于{reset}重置。现在需要更多？请使用 `/premium`。",
         "quota_unavailable": "⚠️ 无法检查你的字符余额。请稍后再试。",
+        "quota_usage_warning": "📊 你已用掉本月免费字符的 {percent}%（剩余 {left} 个）。将于{reset}重置。需要更多？`/premium`",
         "premium_title": "💎 **你的 Translator 字符**",
         "premium_free_line": "本月免费：剩余 **{left}** / {limit} · {reset}重置",
         "premium_packs_line": "字符包：剩余 **{left}** · 最近到期 {expiry}",
@@ -1936,8 +1961,8 @@ LOCALE_STRINGS = {
         "admin_required": "您必須是伺服器管理員才能變更此設定。",
         "server_only": "此命令只能在伺服器中使用。",
         "quota_limit_reached": "📊 您的字元已全部用完。免費字元將於{reset}重設。現在需要更多？請使用 `/premium`。",
-        "quota_not_enough": "📊 這則訊息有 {needed} 個字元，但您只剩 {available} 個。免費字元將於{reset}重設。現在需要更多？請使用 `/premium`。",
         "quota_unavailable": "⚠️ 無法檢查您的字元餘額。請稍後再試。",
+        "quota_usage_warning": "📊 您已使用本月免費字元的 {percent}%（剩餘 {left} 個）。將於{reset}重設。需要更多？`/premium`",
         "premium_title": "💎 **您的 Translator 字元**",
         "premium_free_line": "本月免費：剩餘 **{left}** / {limit} · {reset}重設",
         "premium_packs_line": "字元包：剩餘 **{left}** · 最近到期 {expiry}",
@@ -1977,8 +2002,8 @@ LOCALE_STRINGS = {
         "admin_required": "이 설정을 변경하려면 서버 관리자여야 합니다.",
         "server_only": "이 명령은 서버에서만 사용할 수 있습니다.",
         "quota_limit_reached": "📊 글자 수를 모두 사용했어요. 무료 글자 수는 {reset} 초기화돼요. 지금 더 필요하면 `/premium`을 사용하세요.",
-        "quota_not_enough": "📊 이 메시지는 {needed}자인데 남은 글자 수는 {available}자예요. 무료 글자 수는 {reset} 초기화돼요. 지금 더 필요하면 `/premium`을 사용하세요.",
         "quota_unavailable": "⚠️ 글자 잔액을 확인하지 못했어요. 잠시 후 다시 시도해 주세요.",
+        "quota_usage_warning": "📊 이번 달 무료 글자 수의 {percent}%를 사용했어요 (남은 글자 {left}자). {reset} 초기화돼요. 더 필요하면 `/premium`",
         "premium_title": "💎 **내 Translator 글자 수**",
         "premium_free_line": "이번 달 무료: {limit}자 중 **{left}**자 남음 · {reset} 초기화",
         "premium_packs_line": "패키지: **{left}**자 남음 · 다음 만료 {expiry}",
@@ -2016,8 +2041,8 @@ LOCALE_STRINGS = {
         "admin_required": "Devi essere un amministratore del server per modificare questa impostazione.",
         "server_only": "Questo comando può essere usato solo in un server.",
         "quota_limit_reached": "📊 Hai usato tutti i tuoi caratteri. I caratteri gratuiti si rinnovano {reset}. Ne servono altri subito? Usa `/premium`.",
-        "quota_not_enough": "📊 Questo messaggio ha {needed} caratteri, ma te ne restano solo {available}. I caratteri gratuiti si rinnovano {reset}. Ne servono altri subito? Usa `/premium`.",
         "quota_unavailable": "⚠️ Impossibile verificare il tuo saldo di caratteri. Riprova tra un momento.",
+        "quota_usage_warning": "📊 Hai usato il {percent}% dei caratteri gratuiti di questo mese (ne restano {left}). Si rinnovano {reset}. Te ne servono altri? `/premium`",
         "premium_title": "💎 **I tuoi caratteri Translator**",
         "premium_free_line": "Gratis questo mese: ne restano **{left}** su {limit} · si rinnovano {reset}",
         "premium_packs_line": "Pacchetti: ne restano **{left}** · prossima scadenza {expiry}",
@@ -2055,8 +2080,8 @@ LOCALE_STRINGS = {
         "admin_required": "Je moet serverbeheerder zijn om deze instelling te wijzigen.",
         "server_only": "Deze opdracht kan alleen in een server worden gebruikt.",
         "quota_limit_reached": "📊 Je hebt al je tekens gebruikt. Gratis tekens worden {reset} vernieuwd. Nu meer nodig? Gebruik `/premium`.",
-        "quota_not_enough": "📊 Dit bericht heeft {needed} tekens, maar je hebt er nog maar {available}. Gratis tekens worden {reset} vernieuwd. Nu meer nodig? Gebruik `/premium`.",
         "quota_unavailable": "⚠️ Je tekensaldo kon niet worden gecontroleerd. Probeer het zo opnieuw.",
+        "quota_usage_warning": "📊 Je hebt {percent}% van je gratis tekens voor deze maand gebruikt (nog {left} over). Ze worden {reset} vernieuwd. Meer nodig? `/premium`",
         "premium_title": "💎 **Je Translator-tekens**",
         "premium_free_line": "Gratis deze maand: nog **{left}** van {limit} · vernieuwd {reset}",
         "premium_packs_line": "Pakketten: nog **{left}** · volgende vervaldatum {expiry}",
@@ -2094,8 +2119,8 @@ LOCALE_STRINGS = {
         "admin_required": "Bạn phải là quản trị viên máy chủ để thay đổi cài đặt này.",
         "server_only": "Lệnh này chỉ có thể dùng trong máy chủ.",
         "quota_limit_reached": "📊 Bạn đã dùng hết ký tự. Ký tự miễn phí sẽ được làm mới {reset}. Cần thêm ngay? Hãy dùng `/premium`.",
-        "quota_not_enough": "📊 Tin nhắn này có {needed} ký tự, nhưng bạn chỉ còn {available}. Ký tự miễn phí sẽ được làm mới {reset}. Cần thêm ngay? Hãy dùng `/premium`.",
         "quota_unavailable": "⚠️ Không thể kiểm tra số dư ký tự của bạn. Vui lòng thử lại sau giây lát.",
+        "quota_usage_warning": "📊 Bạn đã dùng {percent}% ký tự miễn phí của tháng này (còn {left}). Ký tự sẽ được làm mới {reset}. Cần thêm? `/premium`",
         "premium_title": "💎 **Ký tự Translator của bạn**",
         "premium_free_line": "Miễn phí tháng này: còn **{left}** / {limit} · làm mới {reset}",
         "premium_packs_line": "Gói: còn **{left}** · hết hạn gần nhất {expiry}",
@@ -2133,8 +2158,8 @@ LOCALE_STRINGS = {
         "admin_required": "Kailangan mong maging server administrator para baguhin ang setting na ito.",
         "server_only": "Magagamit lang ang command na ito sa isang server.",
         "quota_limit_reached": "📊 Naubos mo na ang lahat ng iyong character. Mare-renew ang libreng character {reset}. Kailangan mo pa ngayon? Gamitin ang `/premium`.",
-        "quota_not_enough": "📊 May {needed} character ang mensaheng ito, pero {available} na lang ang natitira sa iyo. Mare-renew ang libreng character {reset}. Kailangan mo pa ngayon? Gamitin ang `/premium`.",
         "quota_unavailable": "⚠️ Hindi ma-check ang iyong character balance. Subukan ulit mamaya.",
+        "quota_usage_warning": "📊 Nagamit mo na ang {percent}% ng libreng character ngayong buwan ({left} na lang ang natitira). Mare-renew ang mga ito {reset}. Kailangan pa? `/premium`",
         "premium_title": "💎 **Ang iyong mga Translator character**",
         "premium_free_line": "Libre ngayong buwan: **{left}** sa {limit} ang natitira · mare-renew {reset}",
         "premium_packs_line": "Mga pack: **{left}** ang natitira · susunod na expiry {expiry}",
@@ -2172,8 +2197,8 @@ LOCALE_STRINGS = {
         "admin_required": "Musisz być administratorem serwera, aby zmienić to ustawienie.",
         "server_only": "Tej komendy można używać tylko na serwerze.",
         "quota_limit_reached": "📊 Wykorzystano wszystkie znaki. Darmowe znaki odnowią się {reset}. Potrzebujesz więcej teraz? Użyj `/premium`.",
-        "quota_not_enough": "📊 Ta wiadomość ma {needed} znaków, a zostało ci tylko {available}. Darmowe znaki odnowią się {reset}. Potrzebujesz więcej teraz? Użyj `/premium`.",
         "quota_unavailable": "⚠️ Nie udało się sprawdzić salda znaków. Spróbuj ponownie za chwilę.",
+        "quota_usage_warning": "📊 Wykorzystano {percent}% darmowych znaków w tym miesiącu (zostało {left}). Odnowią się {reset}. Potrzebujesz więcej? `/premium`",
         "premium_title": "💎 **Twoje znaki Translator**",
         "premium_free_line": "Za darmo w tym miesiącu: zostało **{left}** z {limit} · odnowienie {reset}",
         "premium_packs_line": "Pakiety: zostało **{left}** · najbliższe wygaśnięcie {expiry}",
@@ -2211,8 +2236,8 @@ LOCALE_STRINGS = {
         "admin_required": "Вы должны быть администратором сервера, чтобы изменить эту настройку.",
         "server_only": "Эту команду можно использовать только на сервере.",
         "quota_limit_reached": "📊 Вы израсходовали все символы. Бесплатные символы обновятся {reset}. Нужно больше прямо сейчас? Используйте `/premium`.",
-        "quota_not_enough": "📊 В этом сообщении {needed} символов, а у вас осталось {available}. Бесплатные символы обновятся {reset}. Нужно больше прямо сейчас? Используйте `/premium`.",
         "quota_unavailable": "⚠️ Не удалось проверить баланс символов. Попробуйте ещё раз чуть позже.",
+        "quota_usage_warning": "📊 Вы израсходовали {percent}% бесплатных символов этого месяца (осталось {left}). Они обновятся {reset}. Нужно больше? `/premium`",
         "premium_title": "💎 **Ваши символы Translator**",
         "premium_free_line": "Бесплатно в этом месяце: осталось **{left}** из {limit} · обновление {reset}",
         "premium_packs_line": "Пакеты: осталось **{left}** · ближайшее истечение {expiry}",
@@ -2250,8 +2275,8 @@ LOCALE_STRINGS = {
         "admin_required": "Щоб змінити це налаштування, ви маєте бути адміністратором сервера.",
         "server_only": "Цю команду можна використовувати лише на сервері.",
         "quota_limit_reached": "📊 Ви використали всі символи. Безкоштовні символи оновляться {reset}. Потрібно більше зараз? Скористайтеся `/premium`.",
-        "quota_not_enough": "📊 У цьому повідомленні {needed} символів, а у вас залишилося {available}. Безкоштовні символи оновляться {reset}. Потрібно більше зараз? Скористайтеся `/premium`.",
         "quota_unavailable": "⚠️ Не вдалося перевірити баланс символів. Спробуйте ще раз трохи згодом.",
+        "quota_usage_warning": "📊 Ви використали {percent}% безкоштовних символів цього місяця (залишилося {left}). Вони оновляться {reset}. Потрібно більше? `/premium`",
         "premium_title": "💎 **Ваші символи Translator**",
         "premium_free_line": "Безкоштовно цього місяця: залишилося **{left}** з {limit} · оновлення {reset}",
         "premium_packs_line": "Пакети: залишилося **{left}** · найближче закінчення {expiry}",
@@ -2289,8 +2314,8 @@ LOCALE_STRINGS = {
         "admin_required": "يجب أن تكون مسؤول الخادم لتغيير هذا الإعداد.",
         "server_only": "لا يمكن استخدام هذا الأمر إلا داخل خادم.",
         "quota_limit_reached": "📊 لقد استخدمت كل الأحرف المتاحة لك. تتجدد الأحرف المجانية {reset}. تحتاج إلى المزيد الآن؟ استخدم `/premium`.",
-        "quota_not_enough": "📊 تحتوي هذه الرسالة على {needed} حرفًا، لكن تبقّى لديك {available} فقط. تتجدد الأحرف المجانية {reset}. تحتاج إلى المزيد الآن؟ استخدم `/premium`.",
         "quota_unavailable": "⚠️ تعذّر التحقق من رصيد الأحرف. حاول مرة أخرى بعد قليل.",
+        "quota_usage_warning": "📊 لقد استخدمت {percent}% من الأحرف المجانية لهذا الشهر (تبقّى {left}). تتجدد {reset}. تحتاج إلى المزيد؟ `/premium`",
         "premium_title": "💎 **أحرف Translator الخاصة بك**",
         "premium_free_line": "مجانًا هذا الشهر: تبقّى **{left}** من {limit} · تتجدد {reset}",
         "premium_packs_line": "الحزم: تبقّى **{left}** · أقرب انتهاء {expiry}",
@@ -2328,8 +2353,8 @@ LOCALE_STRINGS = {
         "admin_required": "यह सेटिंग बदलने के लिए आपको सर्वर एडमिन होना होगा।",
         "server_only": "यह कमांड केवल सर्वर में उपयोग की जा सकती है।",
         "quota_limit_reached": "📊 आपने अपने सभी कैरेक्टर इस्तेमाल कर लिए हैं। मुफ़्त कैरेक्टर {reset} रीन्यू होंगे। अभी और चाहिए? `/premium` इस्तेमाल करें।",
-        "quota_not_enough": "📊 इस संदेश में {needed} कैरेक्टर हैं, लेकिन आपके पास सिर्फ़ {available} बचे हैं। मुफ़्त कैरेक्टर {reset} रीन्यू होंगे। अभी और चाहिए? `/premium` इस्तेमाल करें।",
         "quota_unavailable": "⚠️ आपका कैरेक्टर बैलेंस जाँचा नहीं जा सका। कृपया थोड़ी देर बाद फिर से कोशिश करें।",
+        "quota_usage_warning": "📊 आपने इस महीने के मुफ़्त कैरेक्टर का {percent}% इस्तेमाल कर लिया है ({left} बचे हैं)। ये {reset} रीन्यू होंगे। और चाहिए? `/premium`",
         "premium_title": "💎 **आपके Translator कैरेक्टर**",
         "premium_free_line": "इस महीने मुफ़्त: {limit} में से **{left}** बचे · रीन्यू {reset}",
         "premium_packs_line": "पैक: **{left}** बचे · अगली समाप्ति {expiry}",
@@ -2367,8 +2392,8 @@ LOCALE_STRINGS = {
         "admin_required": "Bu ayarı değiştirmek için sunucu yöneticisi olmalısınız.",
         "server_only": "Bu komut yalnızca bir sunucuda kullanılabilir.",
         "quota_limit_reached": "📊 Tüm karakterlerini kullandın. Ücretsiz karakterler {reset} yenilenir. Şimdi daha fazlası mı lazım? `/premium` kullan.",
-        "quota_not_enough": "📊 Bu mesajda {needed} karakter var, ama yalnızca {available} karakterin kaldı. Ücretsiz karakterler {reset} yenilenir. Şimdi daha fazlası mı lazım? `/premium` kullan.",
         "quota_unavailable": "⚠️ Karakter bakiyen kontrol edilemedi. Birazdan tekrar dene.",
+        "quota_usage_warning": "📊 Bu ayki ücretsiz karakterlerinin %{percent} kadarını kullandın ({left} kaldı). {reset} yenilenir. Daha fazlası mı lazım? `/premium`",
         "premium_title": "💎 **Translator karakterlerin**",
         "premium_free_line": "Bu ay ücretsiz: {limit} karakterden **{left}** kaldı · {reset} yenilenir",
         "premium_packs_line": "Paketler: **{left}** kaldı · en yakın bitiş {expiry}",
@@ -2406,8 +2431,8 @@ LOCALE_STRINGS = {
         "admin_required": "Anda harus menjadi administrator server untuk mengubah pengaturan ini.",
         "server_only": "Perintah ini hanya bisa digunakan di server.",
         "quota_limit_reached": "📊 Kamu sudah memakai semua karaktermu. Karakter gratis diperbarui {reset}. Butuh lebih sekarang? Gunakan `/premium`.",
-        "quota_not_enough": "📊 Pesan ini berisi {needed} karakter, tetapi sisa karaktermu hanya {available}. Karakter gratis diperbarui {reset}. Butuh lebih sekarang? Gunakan `/premium`.",
         "quota_unavailable": "⚠️ Saldo karaktermu tidak dapat diperiksa. Coba lagi sebentar lagi.",
+        "quota_usage_warning": "📊 Kamu sudah memakai {percent}% karakter gratis bulan ini (sisa {left}). Karakter diperbarui {reset}. Butuh lebih? `/premium`",
         "premium_title": "💎 **Karakter Translator-mu**",
         "premium_free_line": "Gratis bulan ini: sisa **{left}** dari {limit} · diperbarui {reset}",
         "premium_packs_line": "Paket: sisa **{left}** · kedaluwarsa terdekat {expiry}",
@@ -2445,8 +2470,8 @@ LOCALE_STRINGS = {
         "admin_required": "คุณต้องเป็นผู้ดูแลเซิร์ฟเวอร์เพื่อเปลี่ยนการตั้งค่านี้",
         "server_only": "คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์เท่านั้น",
         "quota_limit_reached": "📊 คุณใช้ตัวอักษรครบแล้ว ตัวอักษรฟรีจะรีเซ็ต{reset} ต้องการเพิ่มตอนนี้? ใช้ `/premium`",
-        "quota_not_enough": "📊 ข้อความนี้มี {needed} ตัวอักษร แต่คุณเหลือเพียง {available} ตัวอักษรฟรีจะรีเซ็ต{reset} ต้องการเพิ่มตอนนี้? ใช้ `/premium`",
         "quota_unavailable": "⚠️ ไม่สามารถตรวจสอบยอดตัวอักษรของคุณได้ โปรดลองอีกครั้งในอีกสักครู่",
+        "quota_usage_warning": "📊 คุณใช้ตัวอักษรฟรีของเดือนนี้ไปแล้ว {percent}% (เหลือ {left}) จะรีเซ็ต{reset} ต้องการเพิ่ม? `/premium`",
         "premium_title": "💎 **ตัวอักษร Translator ของคุณ**",
         "premium_free_line": "ฟรีเดือนนี้: เหลือ **{left}** จาก {limit} · รีเซ็ต{reset}",
         "premium_packs_line": "แพ็ก: เหลือ **{left}** · หมดอายุถัดไป {expiry}",
@@ -2484,8 +2509,8 @@ LOCALE_STRINGS = {
         "admin_required": "Pro změnu tohoto nastavení musíte být správcem serveru.",
         "server_only": "Tento příkaz lze použít pouze na serveru.",
         "quota_limit_reached": "📊 Vyčerpal jsi všechny znaky. Bezplatné znaky se obnoví {reset}. Potřebuješ další hned? Použij `/premium`.",
-        "quota_not_enough": "📊 Tato zpráva má {needed} znaků, ale zbývá ti jen {available}. Bezplatné znaky se obnoví {reset}. Potřebuješ další hned? Použij `/premium`.",
         "quota_unavailable": "⚠️ Zůstatek znaků se nepodařilo ověřit. Zkus to znovu za chvíli.",
+        "quota_usage_warning": "📊 Využil(a) jsi {percent} % bezplatných znaků na tento měsíc (zbývá {left}). Obnoví se {reset}. Potřebuješ víc? `/premium`",
         "premium_title": "💎 **Tvoje znaky Translator**",
         "premium_free_line": "Zdarma tento měsíc: zbývá **{left}** z {limit} · obnovení {reset}",
         "premium_packs_line": "Balíčky: zbývá **{left}** · nejbližší vypršení {expiry}",
@@ -2523,8 +2548,8 @@ LOCALE_STRINGS = {
         "admin_required": "Trebuie să fii administrator al serverului pentru a schimba această setare.",
         "server_only": "Această comandă poate fi folosită doar pe un server.",
         "quota_limit_reached": "📊 Ai folosit toate caracterele. Caracterele gratuite se reînnoiesc {reset}. Ai nevoie de mai multe acum? Folosește `/premium`.",
-        "quota_not_enough": "📊 Acest mesaj are {needed} caractere, dar mai ai doar {available}. Caracterele gratuite se reînnoiesc {reset}. Ai nevoie de mai multe acum? Folosește `/premium`.",
         "quota_unavailable": "⚠️ Nu am putut verifica soldul de caractere. Încearcă din nou peste câteva momente.",
+        "quota_usage_warning": "📊 Ai folosit {percent}% din caracterele gratuite din această lună (mai ai {left}). Se reînnoiesc {reset}. Ai nevoie de mai multe? `/premium`",
         "premium_title": "💎 **Caracterele tale Translator**",
         "premium_free_line": "Gratuit luna aceasta: mai ai **{left}** din {limit} · se reînnoiesc {reset}",
         "premium_packs_line": "Pachete: mai ai **{left}** · următoarea expirare {expiry}",
@@ -2564,8 +2589,8 @@ LOCALE_STRINGS = {
         "admin_required": "Трябва да сте администратор на сървъра, за да промените тази настройка.",
         "server_only": "Тази команда може да се използва само в сървър.",
         "quota_limit_reached": "📊 Използвахте всички символи. Безплатните символи се подновяват {reset}. Нужни са ви още сега? Използвайте `/premium`.",
-        "quota_not_enough": "📊 Това съобщение има {needed} символа, а на вас са ви останали {available}. Безплатните символи се подновяват {reset}. Нужни са ви още сега? Използвайте `/premium`.",
         "quota_unavailable": "⚠️ Балансът на символите не можа да бъде проверен. Опитайте отново след малко.",
+        "quota_usage_warning": "📊 Използвали сте {percent}% от безплатните символи за този месец (остават {left}). Подновяват се {reset}. Нужни са ви още? `/premium`",
         "premium_title": "💎 **Вашите символи в Translator**",
         "premium_free_line": "Безплатно този месец: остават **{left}** от {limit} · подновяване {reset}",
         "premium_packs_line": "Пакети: остават **{left}** · най-близко изтичане {expiry}",
@@ -2605,8 +2630,8 @@ LOCALE_STRINGS = {
         "admin_required": "Morate biti administrator poslužitelja da biste promijenili ovu postavku.",
         "server_only": "Ova se naredba može koristiti samo na poslužitelju.",
         "quota_limit_reached": "📊 Iskoristili ste sve znakove. Besplatni znakovi obnavljaju se {reset}. Trebate još odmah? Upotrijebite `/premium`.",
-        "quota_not_enough": "📊 Ova poruka ima {needed} znakova, a preostalo vam je samo {available}. Besplatni znakovi obnavljaju se {reset}. Trebate još odmah? Upotrijebite `/premium`.",
         "quota_unavailable": "⚠️ Nije moguće provjeriti stanje znakova. Pokušajte ponovno za trenutak.",
+        "quota_usage_warning": "📊 Iskoristili ste {percent}% besplatnih znakova za ovaj mjesec (preostalo {left}). Obnavljaju se {reset}. Trebate još? `/premium`",
         "premium_title": "💎 **Vaši Translator znakovi**",
         "premium_free_line": "Besplatno ovaj mjesec: preostalo **{left}** od {limit} · obnova {reset}",
         "premium_packs_line": "Paketi: preostalo **{left}** · najbliže isteče {expiry}",
@@ -2646,8 +2671,8 @@ LOCALE_STRINGS = {
         "admin_required": "Du skal være serveradministrator for at ændre denne indstilling.",
         "server_only": "Denne kommando kan kun bruges på en server.",
         "quota_limit_reached": "📊 Du har brugt alle dine tegn. Gratis tegn fornyes {reset}. Har du brug for flere nu? Brug `/premium`.",
-        "quota_not_enough": "📊 Denne besked har {needed} tegn, men du har kun {available} tilbage. Gratis tegn fornyes {reset}. Har du brug for flere nu? Brug `/premium`.",
         "quota_unavailable": "⚠️ Din tegnsaldo kunne ikke tjekkes. Prøv igen om lidt.",
+        "quota_usage_warning": "📊 Du har brugt {percent} % af månedens gratis tegn ({left} tilbage). De fornyes {reset}. Brug for flere? `/premium`",
         "premium_title": "💎 **Dine Translator-tegn**",
         "premium_free_line": "Gratis denne måned: **{left}** af {limit} tilbage · fornyes {reset}",
         "premium_packs_line": "Pakker: **{left}** tilbage · næste udløb {expiry}",
@@ -2687,8 +2712,8 @@ LOCALE_STRINGS = {
         "admin_required": "Πρέπει να είστε διαχειριστής του διακομιστή για να αλλάξετε αυτή τη ρύθμιση.",
         "server_only": "Αυτή η εντολή μπορεί να χρησιμοποιηθεί μόνο σε διακομιστή.",
         "quota_limit_reached": "📊 Έχετε χρησιμοποιήσει όλους τους χαρακτήρες σας. Οι δωρεάν χαρακτήρες ανανεώνονται {reset}. Χρειάζεστε περισσότερους τώρα; Χρησιμοποιήστε το `/premium`.",
-        "quota_not_enough": "📊 Αυτό το μήνυμα έχει {needed} χαρακτήρες, αλλά σας απομένουν μόνο {available}. Οι δωρεάν χαρακτήρες ανανεώνονται {reset}. Χρειάζεστε περισσότερους τώρα; Χρησιμοποιήστε το `/premium`.",
         "quota_unavailable": "⚠️ Δεν ήταν δυνατός ο έλεγχος του υπολοίπου χαρακτήρων. Δοκιμάστε ξανά σε λίγο.",
+        "quota_usage_warning": "📊 Έχετε χρησιμοποιήσει το {percent}% των δωρεάν χαρακτήρων αυτού του μήνα (απομένουν {left}). Ανανεώνονται {reset}. Χρειάζεστε περισσότερους; `/premium`",
         "premium_title": "💎 **Οι χαρακτήρες σας στο Translator**",
         "premium_free_line": "Δωρεάν αυτόν τον μήνα: απομένουν **{left}** από {limit} · ανανέωση {reset}",
         "premium_packs_line": "Πακέτα: απομένουν **{left}** · επόμενη λήξη {expiry}",
@@ -2728,8 +2753,8 @@ LOCALE_STRINGS = {
         "admin_required": "A beállítás módosításához szerveradminisztrátornak kell lenned.",
         "server_only": "Ez a parancs csak szerveren használható.",
         "quota_limit_reached": "📊 Elhasználtad az összes karakteredet. Az ingyenes karakterek {reset} újulnak meg. Most kellene több? Használd a `/premium` parancsot.",
-        "quota_not_enough": "📊 Ez az üzenet {needed} karakteres, de csak {available} karaktered maradt. Az ingyenes karakterek {reset} újulnak meg. Most kellene több? Használd a `/premium` parancsot.",
         "quota_unavailable": "⚠️ Nem sikerült ellenőrizni a karakteregyenlegedet. Próbáld újra egy kicsit később.",
+        "quota_usage_warning": "📊 Felhasználtad az e havi ingyenes karaktereid {percent}%-át (maradt {left}). {reset} újulnak meg. Kell több? `/premium`",
         "premium_title": "💎 **Translator karaktereid**",
         "premium_free_line": "Ingyenes ebben a hónapban: **{left}** maradt a(z) {limit} karakterből · megújul {reset}",
         "premium_packs_line": "Csomagok: **{left}** maradt · legközelebbi lejárat {expiry}",
@@ -2769,8 +2794,8 @@ LOCALE_STRINGS = {
         "admin_required": "Du må være serveradministrator for å endre denne innstillingen.",
         "server_only": "Denne kommandoen kan bare brukes på en server.",
         "quota_limit_reached": "📊 Du har brukt alle tegnene dine. Gratis tegn fornyes {reset}. Trenger du flere nå? Bruk `/premium`.",
-        "quota_not_enough": "📊 Denne meldingen har {needed} tegn, men du har bare {available} igjen. Gratis tegn fornyes {reset}. Trenger du flere nå? Bruk `/premium`.",
         "quota_unavailable": "⚠️ Kunne ikke sjekke tegnsaldoen din. Prøv igjen om litt.",
+        "quota_usage_warning": "📊 Du har brukt {percent} % av månedens gratis tegn ({left} igjen). De fornyes {reset}. Trenger du flere? `/premium`",
         "premium_title": "💎 **Dine Translator-tegn**",
         "premium_free_line": "Gratis denne måneden: **{left}** av {limit} igjen · fornyes {reset}",
         "premium_packs_line": "Pakker: **{left}** igjen · neste utløp {expiry}",
@@ -2810,8 +2835,8 @@ LOCALE_STRINGS = {
         "admin_required": "Sinun on oltava palvelimen ylläpitäjä muuttaaksesi tätä asetusta.",
         "server_only": "Tätä komentoa voi käyttää vain palvelimella.",
         "quota_limit_reached": "📊 Olet käyttänyt kaikki merkkisi. Ilmaiset merkit uusiutuvat {reset}. Tarvitsetko lisää heti? Käytä komentoa `/premium`.",
-        "quota_not_enough": "📊 Tässä viestissä on {needed} merkkiä, mutta sinulla on jäljellä vain {available}. Ilmaiset merkit uusiutuvat {reset}. Tarvitsetko lisää heti? Käytä komentoa `/premium`.",
         "quota_unavailable": "⚠️ Merkkisaldoasi ei voitu tarkistaa. Yritä hetken kuluttua uudelleen.",
+        "quota_usage_warning": "📊 Olet käyttänyt {percent} % tämän kuun ilmaisista merkeistä ({left} jäljellä). Ne uusiutuvat {reset}. Tarvitsetko lisää? `/premium`",
         "premium_title": "💎 **Translator-merkkisi**",
         "premium_free_line": "Ilmaiseksi tässä kuussa: jäljellä **{left}** / {limit} · uusiutuu {reset}",
         "premium_packs_line": "Paketit: jäljellä **{left}** · seuraava vanheneminen {expiry}",
@@ -3576,7 +3601,9 @@ class LanguageSelectView(discord.ui.View):
             )
             
             # Edit the ephemeral message to show the translation as plain text.
-            await edit_translation_status(interaction, translated_text, view=None)
+            await edit_translation_status(
+                interaction, append_quota_warning(interaction, translated_text), view=None
+            )
             
             log("Language Select", f"translation shown for {interaction.user.id}")
             
@@ -3785,7 +3812,7 @@ class TranslateButtonView(discord.ui.View):
             )
 
             # Replace the "Translating..." message with the translation
-            await edit_translation_status(interaction, translated_text)
+            await edit_translation_status(interaction, append_quota_warning(interaction, translated_text))
 
             # Record successful translation for post-translation cooldown
             record_translation_success(user_id)
@@ -4266,7 +4293,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         )
 
         # ephemeral=True ensures ONLY the user who clicked 'Translate' sees this result
-        await send_translation(interaction, translated_text)
+        await send_translation(interaction, append_quota_warning(interaction, translated_text))
         
         # Record successful translation for post-translation cooldown
         record_translation_success(interaction.user.id)
