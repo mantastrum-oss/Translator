@@ -1,6 +1,6 @@
 # Translator Privacy Notice
 
-Last updated: 13 November 2026
+Last updated: 17 November 2026
 
 This is a copy of [https://montezproductions.lt/translator/privacy](https://montezproductions.lt/translator/privacy). If the two differ, the version on the website applies.
 
@@ -14,6 +14,7 @@ This notice explains how Translator, our Discord bot, handles personal data. It 
 | Server (guild) and channel IDs, and their translate-button settings | To follow the server administrators’ settings | Legitimate interest in running the bot (Art. 6(1)(f)) |
 | Character usage per user and per server for each month, pack balances and expiry dates | To apply the free allowance and paid packs | Performance of contract (Art. 6(1)(b)) |
 | Event and error logs: time, event or error type, user, server and channel IDs, target language, character count and result. No message text. | To keep the bot reliable, fix errors, prevent abuse and plan capacity | Legitimate interest (Art. 6(1)(f)) |
+| Your public Discord username and avatar, looked up from Discord when we review usage or abuse in our internal dashboard. Only we see them, and they are not stored in our database. | To recognise users when preventing abuse | Legitimate interest (Art. 6(1)(f)) |
 
 Pack purchases are described in our [Privacy Policy](https://montezproductions.lt/privacy).
 
@@ -28,6 +29,7 @@ We do not store the original text or the translation, and neither is written to 
 - **Translation engines**: translations are produced by the MADLAD translation model running on our own server. If it cannot translate a message, the text is sent to **Google Cloud Translation** as a backup.
 - **Discord**: the platform the bot runs on.
 - **Supabase**: our database for settings, usage, pack balances and logs.
+- **Render**: hosts our internal analytics dashboard, which reads the usage data and logs above.
 
 Some of these providers may process data outside the European Economic Area, using the safeguards described in our [Privacy Policy](https://montezproductions.lt/privacy).
 
@@ -36,6 +38,7 @@ Some of these providers may process data outside the European Economic Area, usi
 - Language and server settings: until you change them, the bot is removed from the server, or you ask us to delete them.
 - Usage and pack data: as long as needed to provide the service. Monthly usage totals are kept for up to 24 months.
 - Event and error logs: 2 months, then deleted.
+- Usernames and avatars shown in our dashboard: kept in memory for up to 24 hours, never stored.
 
 ## 5. Your choices
 
