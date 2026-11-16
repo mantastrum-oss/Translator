@@ -64,6 +64,11 @@ Notes:
 
 User-facing updates since version 1.0.
 
+### v2.2.1 - 2026-11-17
+
+- The bot now gives you a heads-up under your translation when you pass 80% and 90% of your free monthly characters, showing how many are left, when they renew, and that `/premium` has more. Not shown while you still have pack characters.
+- If you have any characters left, your next message is always translated in full, even if it's longer than what's left. A note under that translation tells you your free characters are used up and when they renew.
+
 ### v2.2.0 - 2026-11-16
 
 - Every user gets 15,000 free characters a month. They renew on the 1st of each month (UTC).

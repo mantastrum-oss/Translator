@@ -1,7 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -43,12 +43,6 @@ class QuotaDenialMessageTests(unittest.TestCase):
         self.assertIn("/premium", msg)
         self.assertRegex(msg, r"<t:\d+:R>")
 
-    def test_not_enough_shows_needed_and_available(self):
-        msg = bot.format_quota_denial("en-US", QuotaDecision(False, user_quota.REASON_NOT_ENOUGH, 1200, 345))
-        self.assertIn("1,200", msg)
-        self.assertIn("345", msg)
-        self.assertIn("/premium", msg)
-
     def test_unavailable_and_missing_decision(self):
         expected = bot.LOCALE_STRINGS["de"]["quota_unavailable"]
         self.assertEqual(bot.format_quota_denial("de", QuotaDecision(False, user_quota.REASON_UNAVAILABLE)), expected)
@@ -76,6 +70,31 @@ class TranslateRecordsUsageTests(unittest.IsolatedAsyncioTestCase):
              patch.object(bot.resilient_translator, "translate", new_callable=AsyncMock, return_value="⚠️ down"):
             await bot.translate_text_async("Hello", "lt", 7, "lt")
         record.assert_not_awaited()
+
+    async def test_crossed_warning_point_is_shown_once_under_translation(self):
+        usage = user_quota.UsageRecord(recorded=True, warning_percent=90, free_left=1500)
+        interaction = MagicMock()
+        interaction.user.id = 7
+        interaction.locale = "lt"
+        with patch.object(bot, "record_user_usage_async", new_callable=AsyncMock, return_value=usage), \
+             patch.object(bot.resilient_translator, "translate", new_callable=AsyncMock, return_value="Labas"):
+            translated = await bot.translate_text_async("Hello", "lt", 7, "lt")
+
+        shown = bot.append_quota_warning(interaction, translated)
+        self.assertTrue(shown.startswith("Labas\n-# 📊 Išnaudojote 90%"))
+        self.assertIn("1,500", shown)
+        self.assertIn("/premium", shown)
+        self.assertRegex(shown, r"<t:\d+:R>")
+        self.assertEqual(bot.append_quota_warning(interaction, "Labas"), "Labas")
+
+    def test_used_up_shows_limit_reached_text_under_last_translation(self):
+        interaction = MagicMock()
+        interaction.user.id = 8
+        interaction.locale = "lt"
+        bot.quota_usage_warnings[8] = (100, 0)
+        shown = bot.append_quota_warning(interaction, "Labas")
+        self.assertTrue(shown.startswith("Labas\n-# 📊 Išnaudojote visus simbolius"))
+        self.assertIn("/premium", shown)
 
 
 if __name__ == "__main__":

@@ -39,9 +39,13 @@ USER_QUOTA_ENFORCED = os.getenv("USER_QUOTA_ENFORCED", "false").strip().lower() 
 USER_QUOTA_TIMEOUT_SECONDS = 1.5
 USER_QUOTA_CACHE_TTL_SECONDS = 30
 
+# Warn once when this month's free allowance crosses these points (percent used).
+# Not shown to users who still have pack characters (they won't be blocked).
+# 100 = the free allowance is now used up (the next translation will be blocked).
+USAGE_WARNING_PERCENTS = (80, 90, 100)
+
 # Denial reasons (the bot turns them into localized messages)
 REASON_LIMIT_REACHED = "limit_reached"   # nothing left at all
-REASON_NOT_ENOUGH = "not_enough"         # some left, but less than this message needs
 REASON_UNAVAILABLE = "unavailable"       # balance lookup failed (fail closed)
 
 
@@ -66,6 +70,17 @@ class QuotaDecision:
 
 
 ALLOWED = QuotaDecision(allowed=True)
+
+
+@dataclass(frozen=True)
+class UsageRecord:
+    """Result of recording a translation. Truthy when the usage was saved."""
+    recorded: bool
+    warning_percent: Optional[int] = None   # 80/90 when this translation crossed it
+    free_left: int = 0                      # free chars left after it (valid with a warning)
+
+    def __bool__(self) -> bool:
+        return self.recorded
 
 # user_id -> (balance, fetched_at_unix)
 _balance_cache: Dict[str, tuple[QuotaBalance, float]] = {}
@@ -152,14 +167,18 @@ async def get_user_balance_async(user_id: int | str, use_cache: bool = True) -> 
 
 
 def decide_quota(balance: Optional[QuotaBalance], char_count: int) -> QuotaDecision:
-    """Pure decision: may a message of char_count characters be translated?"""
+    """Pure decision: may a message of char_count characters be translated?
+
+    Any balance left lets the whole message through, even if it is longer than
+    what is left (the last translation may go a little over; consume_user_chars
+    caps the deduction). Only an empty balance blocks.
+    """
     if balance is None:
         return QuotaDecision(allowed=False, reason=REASON_UNAVAILABLE, needed=char_count)
-    if balance.available >= char_count:
+    if balance.available > 0 or char_count <= 0:
         return ALLOWED
-    reason = REASON_LIMIT_REACHED if balance.available <= 0 else REASON_NOT_ENOUGH
     return QuotaDecision(
-        allowed=False, reason=reason, needed=char_count, available=max(balance.available, 0)
+        allowed=False, reason=REASON_LIMIT_REACHED, needed=char_count, available=0
     )
 
 
@@ -176,11 +195,37 @@ async def check_user_quota_async(user_id: int | str, char_count: int) -> QuotaDe
     return await asyncio.to_thread(check_user_quota_sync, user_id, char_count)
 
 
-def record_user_usage_sync(user_id: int | str, char_count: int) -> bool:
-    """Atomically deduct a successful translation. Returns False if it could not be recorded."""
+def usage_warning_percent(free_left_before: int, from_free: int, free_limit: int) -> Optional[int]:
+    """Highest warning point (USAGE_WARNING_PERCENTS) crossed by using from_free chars, if any."""
+    if free_limit <= 0 or from_free <= 0:
+        return None
+    used_before = max(free_limit - free_left_before, 0)
+    used_after = used_before + from_free
+    crossed = [
+        p for p in USAGE_WARNING_PERCENTS
+        if used_before * 100 < p * free_limit <= used_after * 100
+    ]
+    return max(crossed) if crossed else None
+
+
+def _cached_balance(user_id_str: str) -> Optional[QuotaBalance]:
+    cached = _balance_cache.get(user_id_str)
+    if cached and _now() - cached[1] < USER_QUOTA_CACHE_TTL_SECONDS:
+        return cached[0]
+    return None
+
+
+def record_user_usage_sync(user_id: int | str, char_count: int) -> UsageRecord:
+    """Atomically deduct a successful translation.
+
+    Falsy if it could not be recorded. When limits are enforced, also says whether
+    this translation crossed a free-allowance warning point (uses the balance the
+    pre-translation check just cached, so no extra lookup).
+    """
     if char_count <= 0:
-        return True
+        return UsageRecord(recorded=True)
     user_id_str = str(user_id)
+    balance_before = _cached_balance(user_id_str)
     try:
         row = _first_row(_rpc_sync("consume_user_chars", {
             "p_user_id": user_id_str,
@@ -189,17 +234,27 @@ def record_user_usage_sync(user_id: int | str, char_count: int) -> bool:
         }))
     except Exception as exc:
         logger.error("Failed to record usage for user %s: %s", user_id_str, exc)
-        return False
+        return UsageRecord(recorded=False)
     finally:
         invalidate_user_quota_cache(user_id_str)
     shortfall = int(row.get("shortfall") or 0)
     if shortfall and USER_QUOTA_ENFORCED:
         # Possible when two translations race past the check; the overdraft is small.
         logger.warning("User %s went %s chars over their balance", user_id_str, shortfall)
-    return True
+    if not USER_QUOTA_ENFORCED or balance_before is None or balance_before.packs_left > 0:
+        return UsageRecord(recorded=True)
+    from_free = int(row.get("from_free") or 0)
+    percent = usage_warning_percent(
+        balance_before.free_left, from_free, DEFAULT_USER_MONTHLY_CHARACTER_LIMIT
+    )
+    return UsageRecord(
+        recorded=True,
+        warning_percent=percent,
+        free_left=max(balance_before.free_left - from_free, 0),
+    )
 
 
-async def record_user_usage_async(user_id: int | str, char_count: int) -> bool:
+async def record_user_usage_async(user_id: int | str, char_count: int) -> UsageRecord:
     return await asyncio.to_thread(record_user_usage_sync, user_id, char_count)
 
 
