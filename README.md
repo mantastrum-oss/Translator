@@ -10,6 +10,7 @@ A translator that adds translation actions to messages and returns user-specific
 - If a user has no saved language, shows a language dropdown selector
 - Supports per-server and per-channel translate button toggles
 - Automatically displays UI messages in the user's native Discord language.
+- 15,000 free characters every month; more with one-time character packs (`/premium`, paid via Stripe, valid 60 days)
 
 ## Translation target languages
 
@@ -44,6 +45,7 @@ The language selector supports 25 target languages (Discord select menu max):
 ## Commands
 
 - `/language` - choose your preferred translation target language
+- `/premium` - see your free characters and packs, and buy a character pack
 - `/translate_button` - enable or disable auto translate buttons for the current server (admin)
 - `/translate_button_channel` - enable or disable auto translate buttons for a specific channel (admin)
 - Message context menu `Translate` - translate the selected message
@@ -61,6 +63,14 @@ Notes:
 ## Changelog
 
 User-facing updates since version 1.0.
+
+### v2.2.0 - 2026-11-16
+
+- Every user gets 15,000 free characters a month. They renew on the 1st of each month (UTC).
+- New `/premium` command: see how many free characters you have left and buy a one-time character pack (30,000 for €3 or 60,000 for €5) securely with Stripe. Packs are valid for 60 days, there is no subscription, and the bot sends you a thank-you message when the characters are added.
+- Free characters are used first, then the pack that expires soonest.
+- When you run out, the bot tells you in your own language when your free characters renew and how to get more.
+- Links, code, mentions and emoji in a message are not counted as characters.
 
 ### v2.1.6 - 2026-11-10
 
