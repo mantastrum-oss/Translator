@@ -3510,9 +3510,9 @@ class LanguageSelectView(discord.ui.View):
             )
             return
 
-        original_author_id = getattr(getattr(self.original_message, "author", None), "id", interaction.user.id)
+        # Blocks apply to the person asking for the translation (dashboard "Block").
         if await is_translation_blocked(
-            user_id=str(original_author_id),
+            user_id=str(interaction.user.id),
             guild_id=getattr(getattr(interaction, "guild", None), "id", None),
             channel_id=getattr(getattr(interaction, "channel", None), "id", None),
         ):
@@ -3671,9 +3671,8 @@ class TranslateButtonView(discord.ui.View):
                 )
                 return
 
-            original_author_id = getattr(getattr(original_message, "author", None), "id", user_id)
             if await is_translation_blocked(
-                user_id=str(original_author_id),
+                user_id=str(interaction.user.id),
                 guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                 channel_id=getattr(getattr(interaction, "channel", None), "id", None),
             ):
@@ -4155,7 +4154,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         return
 
     if await is_translation_blocked(
-        user_id=str(getattr(getattr(message, "author", None), "id", interaction.user.id)),
+        user_id=str(interaction.user.id),
         guild_id=getattr(getattr(interaction, "guild", None), "id", None),
         channel_id=getattr(getattr(interaction, "channel", None), "id", None),
     ):
