@@ -12,7 +12,7 @@ import bot
 
 
 class BlockEnforcementPathTests(unittest.IsolatedAsyncioTestCase):
-    async def test_button_checks_original_message_author_before_provider(self):
+    async def test_button_checks_the_requester_not_the_message_author(self):
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=999),
             guild=SimpleNamespace(id=456),
@@ -44,12 +44,29 @@ class BlockEnforcementPathTests(unittest.IsolatedAsyncioTestCase):
             await bot.TranslateButtonView.translate_button(view, interaction, button)
 
         blocked.assert_awaited_once_with(
-            user_id="123456789012345678",
+            user_id="999",
             guild_id=456,
             channel_id=789,
         )
         provider.assert_not_called()
         interaction.followup.send.assert_not_awaited()
+
+    async def test_context_menu_checks_the_requester_not_the_message_author(self):
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=999),
+            guild=SimpleNamespace(id=456),
+            channel=SimpleNamespace(id=789),
+            locale="en-US",
+            response=SimpleNamespace(is_done=lambda: False, send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        message = SimpleNamespace(content="source content", author=SimpleNamespace(id=123456789012345678))
+
+        with patch.object(bot, "is_translation_blocked", new_callable=AsyncMock, return_value=True) as blocked,              patch.object(bot, "translate_text") as provider:
+            await bot.translate_message.callback(interaction, message)
+
+        blocked.assert_awaited_once_with(user_id="999", guild_id=456, channel_id=789)
+        provider.assert_not_called()
 
 
 if __name__ == "__main__":
