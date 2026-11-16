@@ -8,6 +8,9 @@ Stripe one-time character packs (Checkout + polling, no webhook endpoint).
   `checkout.session.async_payment_succeeded` events and grants each paid session as a pack
   in Supabase (`user_quota.grant_pack_sync`). The unique `stripe_session_id` makes this
   idempotent, so overlapping polls and restarts never credit a payment twice.
+- The same poll revokes packs on a full refund (`charge.refunded`) or a dispute
+  (`charge.dispute.created`): chars_left = 0, refunded_at set. Partial refunds are only logged.
+  Required restricted-key permissions: Checkout Sessions write, Events read.
 
 All HTTP is blocking urllib: call these via asyncio.to_thread.
 """
@@ -51,6 +54,7 @@ TERMS_CONSENT_TEXT = (
 )
 
 PAID_EVENT_TYPES = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+REVOKE_EVENT_TYPES = ("charge.refunded", "charge.dispute.created")
 DISCORD_ID_RE = re.compile(r"^\d{15,22}$")
 
 
@@ -155,11 +159,15 @@ def pack_row_from_session(session: dict, paid_at: int) -> Optional[dict]:
     }
 
 
-def _list_paid_events_sync(since_ts: int) -> list[dict]:
-    """All paid-checkout events created at or after since_ts, oldest first."""
+def _list_events_sync(since_ts: int) -> list[dict]:
+    """All paid-checkout and refund/dispute events created at or after since_ts, oldest first."""
     events, starting_after = [], None
     while True:
-        params = {"types[]": list(PAID_EVENT_TYPES), "created[gte]": since_ts, "limit": 100}
+        params = {
+            "types[]": list(PAID_EVENT_TYPES + REVOKE_EVENT_TYPES),
+            "created[gte]": since_ts,
+            "limit": 100,
+        }
         if starting_after:
             params["starting_after"] = starting_after
         page = _stripe_request("GET", "events", params)
@@ -170,15 +178,53 @@ def _list_paid_events_sync(since_ts: int) -> list[dict]:
     return sorted(events, key=lambda e: e["created"])
 
 
-def poll_once_sync(since_ts: int) -> tuple[int, list[dict]]:
-    """Grant every paid session since since_ts. Returns (next since_ts, newly granted rows;
-    each also carries the buyer's "locale" for the thank-you message).
+def _session_id_for_payment_intent(payment_intent: str) -> Optional[str]:
+    """The Checkout Session that created this payment (needs Checkout Sessions read)."""
+    page = _stripe_request("GET", "checkout/sessions", {"payment_intent": payment_intent, "limit": 1})
+    data = page.get("data") or []
+    return data[0]["id"] if data else None
 
-    If a grant fails, the cursor stays before it so the next poll retries it.
+
+def _revoke_for_event_sync(event: dict) -> list[dict]:
+    """Full refund or dispute → revoke the pack bought with that payment. Returns revoked rows."""
+    obj = event.get("data", {}).get("object", {})
+    if event.get("type") == "charge.refunded" and not obj.get("refunded"):
+        logger.warning(
+            "Partial refund on %s (%s of %s cents): pack left unchanged, adjust it by hand if needed",
+            obj.get("payment_intent"), obj.get("amount_refunded"), obj.get("amount"),
+        )
+        return []
+    payment_intent = obj.get("payment_intent")
+    if not payment_intent:
+        return []
+    session_id = _session_id_for_payment_intent(payment_intent)
+    if not session_id:
+        logger.warning("No Checkout Session for %s (%s); nothing to revoke", payment_intent, event.get("type"))
+        return []
+    revoked = user_quota.revoke_pack_sync(session_id)
+    for row in revoked:
+        logger.info("Revoked pack %s of user %s (%s)", session_id, row.get("user_id"), event.get("type"))
+    return revoked
+
+
+def poll_once_sync(since_ts: int) -> tuple[int, list[dict]]:
+    """Grant every paid session and revoke refunded/disputed ones since since_ts.
+    Returns (next since_ts, newly granted rows; each also carries the buyer's "locale"
+    for the thank-you message).
+
+    If a grant or revoke fails, the cursor stays before it so the next poll retries it.
     """
     granted: list[dict] = []
     newest = since_ts
-    for event in _list_paid_events_sync(since_ts):
+    for event in _list_events_sync(since_ts):
+        if event.get("type") in REVOKE_EVENT_TYPES:
+            try:
+                _revoke_for_event_sync(event)
+            except Exception as exc:
+                logger.error("Failed to revoke pack for %s: %s", event.get("id"), exc)
+                return event["created"] - 1, granted
+            newest = max(newest, event["created"])
+            continue
         session = event.get("data", {}).get("object", {})
         row = pack_row_from_session(session, event["created"])
         if row is None:

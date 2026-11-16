@@ -28,8 +28,14 @@ def session(sid="cs_test_1", paid=True, user=USER, pack="small", amount=300):
     }
 
 
-def event(created, sess):
-    return {"id": f"evt_{sess['id']}", "created": created, "data": {"object": sess}}
+def event(created, sess, type_="checkout.session.completed"):
+    return {"id": f"evt_{sess['id']}", "type": type_, "created": created, "data": {"object": sess}}
+
+
+def refund_event(created, pi="pi_1", full=True, type_="charge.refunded"):
+    charge = {"id": f"ch_{pi}", "payment_intent": pi, "refunded": full,
+              "amount": 500, "amount_refunded": 500 if full else 200}
+    return {"id": f"evt_r_{pi}", "type": type_, "created": created, "data": {"object": charge}}
 
 
 class PackRowTests(unittest.TestCase):
@@ -70,7 +76,7 @@ class PollTests(unittest.TestCase):
 
     def test_grants_new_paid_sessions_and_advances_cursor(self):
         events = [event(1000, session("cs_a")), event(1100, session("cs_b", pack="large"))]
-        with patch.object(sp, "_list_paid_events_sync", return_value=events), \
+        with patch.object(sp, "_list_events_sync", return_value=events), \
              patch.object(user_quota, "grant_pack_sync", side_effect=[True, False]) as grant:
             since, granted = sp.poll_once_sync(900)
 
@@ -80,7 +86,7 @@ class PollTests(unittest.TestCase):
 
     def test_failed_grant_keeps_cursor_before_it_for_retry(self):
         events = [event(1000, session("cs_a")), event(1100, session("cs_b"))]
-        with patch.object(sp, "_list_paid_events_sync", return_value=events), \
+        with patch.object(sp, "_list_events_sync", return_value=events), \
              patch.object(user_quota, "grant_pack_sync", side_effect=[True, OSError("db down")]):
             since, granted = sp.poll_once_sync(900)
 
@@ -88,18 +94,90 @@ class PollTests(unittest.TestCase):
         self.assertEqual(since, 1099)
 
     def test_cursor_never_moves_backwards(self):
-        with patch.object(sp, "_list_paid_events_sync", return_value=[]):
+        with patch.object(sp, "_list_events_sync", return_value=[]):
             since, granted = sp.poll_once_sync(5000)
         self.assertEqual((since, granted), (5000, []))
 
     def test_events_request_filters_paid_types_and_time(self):
         with patch.object(sp, "_stripe_request", return_value={"data": [], "has_more": False}) as req:
-            sp._list_paid_events_sync(1234)
+            sp._list_events_sync(1234)
         method, path, params = req.call_args[0]
         self.assertEqual((method, path), ("GET", "events"))
         self.assertEqual(params["created[gte]"], 1234)
         self.assertIn("checkout.session.completed", params["types[]"])
         self.assertIn("checkout.session.async_payment_succeeded", params["types[]"])
+        self.assertIn("charge.refunded", params["types[]"])
+        self.assertIn("charge.dispute.created", params["types[]"])
+
+
+class RefundTests(unittest.TestCase):
+    def poll(self, events, session_id="cs_a", revoke=None):
+        revoke = revoke or MagicMock(return_value=[{"user_id": USER}])
+        with patch.object(sp, "PACKS", PACKS), \
+             patch.object(sp, "_list_events_sync", return_value=events), \
+             patch.object(sp, "_session_id_for_payment_intent", return_value=session_id) as lookup, \
+             patch.object(user_quota, "grant_pack_sync", return_value=True), \
+             patch.object(user_quota, "revoke_pack_sync", revoke):
+            result = sp.poll_once_sync(900)
+        return result, lookup, revoke
+
+    def test_full_refund_revokes_the_pack_of_that_payment(self):
+        (since, granted), lookup, revoke = self.poll([refund_event(1000, "pi_9")])
+        lookup.assert_called_once_with("pi_9")
+        revoke.assert_called_once_with("cs_a")
+        self.assertEqual(granted, [])
+
+    def test_dispute_also_revokes(self):
+        _, _, revoke = self.poll([refund_event(1000, "pi_9", type_="charge.dispute.created")])
+        revoke.assert_called_once_with("cs_a")
+
+    def test_partial_refund_leaves_pack(self):
+        _, lookup, revoke = self.poll([refund_event(1000, full=False)])
+        lookup.assert_not_called()
+        revoke.assert_not_called()
+
+    def test_refund_of_unknown_payment_is_skipped(self):
+        (since, _), _, revoke = self.poll([refund_event(1000)], session_id=None)
+        revoke.assert_not_called()
+        self.assertEqual(since, 900)  # processed (not retried); cursor never moves back
+
+    def test_grant_then_refund_in_one_poll(self):
+        events = [event(1000, session("cs_a")), refund_event(1050)]
+        (since, granted), _, revoke = self.poll(events)
+        self.assertEqual([r["stripe_session_id"] for r in granted], ["cs_a"])
+        revoke.assert_called_once_with("cs_a")
+
+    def test_failed_revoke_is_retried_next_poll(self):
+        (since, _), _, _ = self.poll([refund_event(1000)], revoke=MagicMock(side_effect=OSError("db down")))
+        self.assertEqual(since, 999)
+
+    def test_session_lookup_by_payment_intent(self):
+        with patch.object(sp, "_stripe_request", return_value={"data": [{"id": "cs_z"}]}) as req:
+            self.assertEqual(sp._session_id_for_payment_intent("pi_9"), "cs_z")
+        self.assertEqual(req.call_args[0][:2], ("GET", "checkout/sessions"))
+        self.assertEqual(req.call_args[0][2]["payment_intent"], "pi_9")
+
+
+class RevokePackTests(unittest.TestCase):
+    def test_patch_zeroes_balance_only_if_not_yet_refunded(self):
+        response = MagicMock()
+        response.read.return_value = json.dumps([{"user_id": USER, "pack_code": "small", "chars_left": 0}]).encode()
+        user_quota._balance_cache[USER] = (object(), 0)
+        with patch("user_quota.SUPABASE_URL", "https://example.supabase.co"), \
+             patch("user_quota.SUPABASE_SERVICE_ROLE_KEY", "key"), \
+             patch("urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = response
+            rows = user_quota.revoke_pack_sync("cs_a")
+
+        self.assertEqual(rows[0]["user_id"], USER)
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertIn("stripe_session_id=eq.cs_a", request.full_url)
+        self.assertIn("refunded_at=is.null", request.full_url)
+        body = json.loads(request.data)
+        self.assertEqual(body["chars_left"], 0)
+        self.assertIn("refunded_at", body)
+        self.assertNotIn(USER, user_quota._balance_cache)
 
 
 class CheckoutSessionTests(unittest.TestCase):

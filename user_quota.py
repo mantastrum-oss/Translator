@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -222,3 +223,31 @@ def grant_pack_sync(row: dict) -> bool:
         inserted = json.loads(response.read().decode("utf-8") or "[]")
     invalidate_user_quota_cache(row["user_id"])
     return bool(inserted)
+
+
+def revoke_pack_sync(stripe_session_id: str) -> list[dict]:
+    """Mark a pack refunded and zero its balance (refund or dispute).
+
+    Returns the rows changed ([] if unknown or already revoked). Raises on failure.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("Supabase not configured")
+    query = urllib.parse.urlencode({
+        "stripe_session_id": f"eq.{stripe_session_id}",
+        "refunded_at": "is.null",
+        "select": "user_id,pack_code,chars_left",
+    })
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/user_packs?{query}",
+        data=json.dumps({
+            "refunded_at": datetime.now(timezone.utc).isoformat(),
+            "chars_left": 0,
+        }).encode("utf-8"),
+        headers={**_supabase_headers(), "Prefer": "return=representation"},
+        method="PATCH",
+    )
+    with urllib.request.urlopen(request, timeout=USER_QUOTA_TIMEOUT_SECONDS * 2) as response:
+        rows = json.loads(response.read().decode("utf-8") or "[]")
+    for row in rows:
+        invalidate_user_quota_cache(row["user_id"])
+    return rows
