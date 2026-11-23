@@ -1551,6 +1551,72 @@ async def send_translation(interaction: discord.Interaction, content: str) -> No
         await send_response(interaction, content=chunk, ephemeral=True)
 
 
+# Discord drops an interaction that is not answered within 3 seconds of being created.
+# Until the bot answers, Discord shows its own loading spinner on the clicked button.
+INTERACTION_ANSWER_DEADLINE_SECONDS = 2.0
+
+
+def interaction_answer_budget(interaction: discord.Interaction) -> float:
+    """Seconds left to answer the interaction directly (0 when it must be acknowledged now)."""
+    created_at = getattr(interaction, "created_at", None)
+    elapsed = (datetime.now(timezone.utc) - created_at).total_seconds() if created_at else 0.0
+    return max(0.0, min(INTERACTION_ANSWER_DEADLINE_SECONDS, INTERACTION_ANSWER_DEADLINE_SECONDS - elapsed))
+
+
+async def translate_while_loading(
+    interaction: discord.Interaction, translation, *, thinking: bool = True
+) -> str:
+    """Await `translation` while Discord shows its loading spinner on the clicked button.
+
+    Most translations finish in time to be the interaction's direct answer, so the
+    private reply is sent once and never edited. A slow one is acknowledged before
+    Discord's deadline: thinking=True shows "<bot> is thinking..." in a new private
+    reply, thinking=False keeps the clicked message as it is. That reply is then
+    edited once with the result (see deliver_translation).
+    """
+    task = asyncio.ensure_future(translation)
+    budget = interaction_answer_budget(interaction)
+    if budget > 0:
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), budget)
+        except asyncio.TimeoutError:
+            pass
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=thinking)
+        except Exception:
+            # Interaction gone or already answered: don't charge for a translation nobody sees.
+            task.cancel()
+            raise
+    return await task
+
+
+async def deliver_translation(
+    interaction: discord.Interaction, content: str, *, replace_clicked_message: bool = False
+) -> None:
+    """Show content privately. As the interaction's direct answer when it has not been
+    acknowledged yet (one message, no edits); otherwise by editing the acknowledgement once.
+
+    replace_clicked_message: show it in place of the private message whose component
+    was clicked (the language picker) instead of in a new private message.
+    """
+    if interaction.response.is_done():
+        edit_kwargs = {"view": None} if replace_clicked_message else {}
+        await edit_translation_status(interaction, content, **edit_kwargs)
+        return
+    first, *rest = split_for_discord(content) or [content]
+    try:
+        if replace_clicked_message:
+            await interaction.response.edit_message(content=first, view=None)
+        else:
+            await interaction.response.send_message(content=first, ephemeral=True)
+    except Exception as exc:
+        log("Button", f"failed to answer interaction with translation: {exc}")
+        await send_response(interaction, content=first, ephemeral=True)
+    for chunk in rest:
+        await send_response(interaction, content=chunk, ephemeral=True)
+
+
 # Localized strings for different Discord locales
 LOCALE_STRINGS = {
     "en-US": {
@@ -3522,30 +3588,27 @@ class LanguageSelectView(discord.ui.View):
         self.selected_lang = selected_lang
         
         try:
-            # Defer before processing to avoid timeout
+            # Show the selected language in the dropdown. Answering the interaction
+            # with the updated message is one call and no separate message edit.
+            lang_display = self.lang_names.get(selected_lang, selected_lang)
+            self.select_language.placeholder = f"✓ {lang_display}"
             if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            
-            # Save the language immediately when selected
+                await interaction.response.edit_message(view=self)
+
+            # Save the language
             user_languages[interaction.user.id] = self.selected_lang
             try:
                 await persist_user_language(interaction.user.id, self.selected_lang)
                 log("Language Select", f"saved language {self.selected_lang} for user {interaction.user.id}")
             except Exception as save_error:
                 log("Language Select", f"failed to save language: {save_error}")
-            
-            # Update the dropdown placeholder to show the selected language
-            lang_display = self.lang_names.get(selected_lang, selected_lang)
-            self.select_language.placeholder = f"✓ {lang_display}"
-            
-            # Update the ephemeral message to show the selected language in the dropdown
-            await interaction.edit_original_response(view=self)
-            
+
             log("Language Select", f"language {selected_lang} selected by {interaction.user.id}")
-            
+
         except Exception as e:
             traceback.print_exc()
-            await interaction.followup.send(
+            await send_response(
+                interaction,
                 content=get_maintenance_error_message(interaction.locale),
                 ephemeral=True,
             )
@@ -3606,10 +3669,6 @@ class LanguageSelectView(discord.ui.View):
             return
 
         try:
-            # Defer before processing to avoid timeout
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            
             # Save the selected language to the user's preferences
             user_languages[interaction.user.id] = self.selected_lang
             try:
@@ -3617,14 +3676,20 @@ class LanguageSelectView(discord.ui.View):
                 log("Language Select", f"saved language {self.selected_lang} for user {interaction.user.id}")
             except Exception as save_error:
                 log("Language Select", f"failed to save language: {save_error}")
-            
-            # Translate the original message with the selected language
+
+            # Translate the original message with the selected language. The button
+            # shows Discord's loading spinner meanwhile; a slow translation is
+            # acknowledged in time and keeps the picker until the result replaces it.
             user_locale = str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
-            translated_text = await translate_text_async(
-                self.original_message.content, 
-                self.selected_lang,
-                interaction.user.id,
-                user_locale
+            translated_text = await translate_while_loading(
+                interaction,
+                translate_text_async(
+                    self.original_message.content,
+                    self.selected_lang,
+                    interaction.user.id,
+                    user_locale,
+                ),
+                thinking=False,
             )
             emit_translation_analytics_event(
                 source="language_select_button",
@@ -3637,9 +3702,9 @@ class LanguageSelectView(discord.ui.View):
                 error_code="translation_failed" if is_translation_error_text(translated_text) else None,
             )
             
-            # Edit the ephemeral message to show the translation as plain text.
-            await edit_translation_status(
-                interaction, append_quota_warning(interaction, translated_text), view=None
+            # Show the translation in place of the language picker.
+            await deliver_translation(
+                interaction, append_quota_warning(interaction, translated_text), replace_clicked_message=True
             )
             
             log("Language Select", f"translation shown for {interaction.user.id}")
@@ -3656,7 +3721,8 @@ class LanguageSelectView(discord.ui.View):
                 error_code=normalize_analytics_error_code(e),
             )
             traceback.print_exc()
-            await interaction.followup.send(
+            await send_response(
+                interaction,
                 content=get_maintenance_error_message(interaction.locale),
                 ephemeral=True,
             )
@@ -3801,35 +3867,29 @@ class TranslateButtonView(discord.ui.View):
                 )
                 return
 
-            # Language is already saved. Acknowledge with a private, localized
-            # "Translating..." message, then replace it with the translation.
-            # The public message is never edited (shared label + channel rate limits).
-            if not interaction.response.is_done():
-                try:
-                    await interaction.response.send_message(
-                        content=f"-# {get_localized_string(interaction.locale, 'translating_now', 'Translating...')}",
-                        ephemeral=True,
-                    )
-                except Exception as ack_exc:
-                    if isinstance(ack_exc, discord.errors.NotFound):
-                        log(
-                            "Button",
-                            f"acknowledge failed because interaction is already gone: {ack_exc}",
-                            logging.WARNING,
-                        )
-                        return
-                    if isinstance(ack_exc, discord.errors.HTTPException) and ack_exc.status == 400 and ack_exc.code == 40060:
-                        log("Button", f"acknowledge skipped because interaction was already acknowledged: {ack_exc}")
-                        return
-                    raise
-
+            # Language is already saved. While translating, Discord shows its own
+            # loading spinner on the button; the translation is then sent as one
+            # private reply with no edits (a slow one gets "<bot> is thinking..."
+            # first). The public message is never edited (shared label + channel
+            # rate limits).
             try:
-                translated_text = await translate_text_async(
-                    original_message.content,
-                    target_lang,
-                    user_id,
-                    str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en'
+                translated_text = await translate_while_loading(
+                    interaction,
+                    translate_text_async(
+                        original_message.content,
+                        target_lang,
+                        user_id,
+                        str(interaction.locale).split('-')[0].lower() if interaction.locale else 'en',
+                    ),
                 )
+            except (discord.errors.NotFound, discord.errors.InteractionResponded) as ack_exc:
+                log("Button", f"interaction gone or already answered: {ack_exc}", logging.WARNING)
+                return
+            except discord.errors.HTTPException as ack_exc:
+                if ack_exc.status == 400 and ack_exc.code == 40060:
+                    log("Button", f"interaction was already acknowledged: {ack_exc}")
+                    return
+                raise
             except Exception as translate_exc:
                 emit_translation_analytics_event(
                     source="button",
@@ -3842,7 +3902,7 @@ class TranslateButtonView(discord.ui.View):
                     error_code=normalize_analytics_error_code(translate_exc),
                 )
                 traceback.print_exc()
-                await edit_translation_status(interaction, get_maintenance_error_message(interaction.locale))
+                await deliver_translation(interaction, get_maintenance_error_message(interaction.locale))
                 return
 
             emit_translation_analytics_event(
@@ -3856,8 +3916,7 @@ class TranslateButtonView(discord.ui.View):
                 error_code="translation_failed" if is_translation_error_text(translated_text) else None,
             )
 
-            # Replace the "Translating..." message with the translation
-            await edit_translation_status(interaction, append_quota_warning(interaction, translated_text))
+            await deliver_translation(interaction, append_quota_warning(interaction, translated_text))
 
             # Record successful translation for post-translation cooldown
             record_translation_success(user_id)
@@ -4320,18 +4379,16 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         return
 
     try:
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-                log("Context Menu", f"deferred interaction {interaction.id}")
-        except Exception as defer_error:
-            log("Context Menu", f"defer failed: {defer_error}")
-
-        translated_text = await translate_text_async(
-            message.content,
-            target_lang,
-            interaction.user.id,
-            str(interaction.locale).split("-")[0].lower() if interaction.locale else "en",
+        # Answered directly when the translation is quick (no edits); a slow one
+        # shows "<bot> is thinking..." first.
+        translated_text = await translate_while_loading(
+            interaction,
+            translate_text_async(
+                message.content,
+                target_lang,
+                interaction.user.id,
+                str(interaction.locale).split("-")[0].lower() if interaction.locale else "en",
+            ),
         )
 
         emit_translation_analytics_event(
@@ -4345,8 +4402,8 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
             error_code="translation_failed" if is_translation_error_text(translated_text) else None,
         )
 
-        # ephemeral=True ensures ONLY the user who clicked 'Translate' sees this result
-        await send_translation(interaction, append_quota_warning(interaction, translated_text))
+        # Private: ONLY the user who clicked 'Translate' sees this result
+        await deliver_translation(interaction, append_quota_warning(interaction, translated_text))
         
         # Record successful translation for post-translation cooldown
         record_translation_success(interaction.user.id)
