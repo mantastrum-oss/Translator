@@ -3801,15 +3801,13 @@ class TranslateButtonView(discord.ui.View):
                 )
                 return
 
-            # Language is already saved. Acknowledge with a private, localized
-            # "Translating..." message, then replace it with the translation.
-            # The public message is never edited (shared label + channel rate limits).
+            # Language is already saved. Acknowledge with Discord's own private
+            # "<bot> is thinking..." loading indicator, then replace it with the
+            # translation. The public message is never edited (shared label +
+            # channel rate limits).
             if not interaction.response.is_done():
                 try:
-                    await interaction.response.send_message(
-                        content=f"-# {get_localized_string(interaction.locale, 'translating_now', 'Translating...')}",
-                        ephemeral=True,
-                    )
+                    await interaction.response.defer(ephemeral=True, thinking=True)
                 except Exception as ack_exc:
                     if isinstance(ack_exc, discord.errors.NotFound):
                         log(

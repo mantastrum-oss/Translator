@@ -19,6 +19,9 @@ def make_interaction(locale="lt"):
     async def send_message(**kwargs):
         state["done"] = True
 
+    async def defer(**kwargs):
+        state["done"] = True
+
     return SimpleNamespace(
         user=SimpleNamespace(id=USER_ID),
         guild=SimpleNamespace(id=456),
@@ -36,7 +39,7 @@ def make_interaction(locale="lt"):
         locale=locale,
         response=SimpleNamespace(
             is_done=lambda: state["done"],
-            defer=AsyncMock(),
+            defer=AsyncMock(side_effect=defer),
             send_message=AsyncMock(side_effect=send_message),
         ),
         followup=SimpleNamespace(send=AsyncMock()),
@@ -58,15 +61,13 @@ class TranslateButtonStatusTests(unittest.IsolatedAsyncioTestCase):
              patch.object(bot, "record_translation_success"):
             await bot.TranslateButtonView.translate_button(view, interaction, button)
 
-    async def test_shows_localized_translating_message_then_replaces_it(self):
+    async def test_shows_discord_loading_indicator_then_replaces_it(self):
         interaction = make_interaction(locale="lt")
         await self.click(interaction, AsyncMock(return_value="Labas visiems"))
 
-        interaction.response.send_message.assert_awaited_once()
-        kwargs = interaction.response.send_message.await_args.kwargs
-        self.assertTrue(kwargs["ephemeral"])
-        self.assertEqual(kwargs["content"], f"-# {bot.LOCALE_STRINGS['lt']['translating_now']}")
-        interaction.response.defer.assert_not_awaited()
+        # Private "<bot> is thinking..." instead of a text status message
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        interaction.response.send_message.assert_not_awaited()
 
         interaction.edit_original_response.assert_awaited_once_with(content="Labas visiems")
         interaction.followup.send.assert_not_awaited()

@@ -133,7 +133,7 @@ class InteractionLevelCooldownTests(unittest.IsolatedAsyncioTestCase):
             def is_done(self):
                 return self._done
 
-            async def defer(self, ephemeral=True):
+            async def defer(self, ephemeral=True, thinking=False):
                 self._done = True
 
             async def send_message(self, **kwargs):
