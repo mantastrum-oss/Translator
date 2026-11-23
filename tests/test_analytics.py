@@ -111,3 +111,43 @@ class AnalyticsWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotaAnalyticsTests(unittest.TestCase):
+    def _interaction(self):
+        interaction = Mock()
+        interaction.user.id = 123
+        interaction.guild.id = 456
+        interaction.channel.id = 789
+        return interaction
+
+    def test_limit_reached_denial_is_recorded_as_quota_exceeded(self):
+        decision = bot.QuotaDecision(allowed=False, reason=bot.user_quota.REASON_LIMIT_REACHED, needed=40)
+        with patch.object(bot, "emit_translation_analytics_event") as emit:
+            bot.emit_quota_denied_event(
+                self._interaction(), source="button", target_lang="lt", char_count=40, decision=decision
+            )
+        emit.assert_called_once()
+        kwargs = emit.call_args.kwargs
+        self.assertEqual(kwargs["error_code"], "quota_exceeded")
+        self.assertFalse(kwargs["success"])
+        self.assertEqual(kwargs["user_id"], 123)
+        self.assertEqual(kwargs["char_count"], 40)
+
+    def test_balance_lookup_failure_is_not_recorded(self):
+        decision = bot.QuotaDecision(allowed=False, reason=bot.user_quota.REASON_UNAVAILABLE, needed=40)
+        with patch.object(bot, "emit_translation_analytics_event") as emit:
+            bot.emit_quota_denied_event(
+                self._interaction(), source="button", target_lang="lt", char_count=40, decision=decision
+            )
+        emit.assert_not_called()
+
+    def test_analytics_chars_match_billed_chars(self):
+        text = "Hello <@123> https://example.com/some/long/path"
+        self.assertLess(bot.billable_char_count(text), len(text))
+
+    def test_error_strings_are_not_successful_translations(self):
+        self.assertTrue(bot.is_translation_error_text("⚠️ Translation service temporarily unavailable."))
+        self.assertTrue(bot.is_translation_error_text("⏳ Slow down"))
+        self.assertFalse(bot.is_translation_error_text("Labas"))
+        self.assertFalse(bot.is_translation_error_text(""))

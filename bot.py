@@ -967,6 +967,35 @@ async def check_translation_quota(
     return decision.allowed, decision
 
 
+def is_translation_error_text(text: str | None) -> bool:
+    """translate_text_async returns these instead of raising; nothing is deducted for them."""
+    return bool(text) and (text.startswith("⚠️") or text.startswith("⏳"))
+
+
+def emit_quota_denied_event(
+    interaction: discord.Interaction,
+    *,
+    source: str,
+    target_lang: str | None,
+    char_count: int,
+    decision: QuotaDecision | None,
+) -> None:
+    """Record a translation refused because the user has no characters left, so the
+    dashboard can count users who hit the free limit. Lookup failures are not recorded."""
+    if getattr(decision, "reason", None) != user_quota.REASON_LIMIT_REACHED:
+        return
+    emit_translation_analytics_event(
+        source=source,
+        user_id=interaction.user.id,
+        guild_id=getattr(getattr(interaction, "guild", None), "id", None),
+        channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+        target_lang=target_lang,
+        char_count=char_count,
+        success=False,
+        error_code="quota_exceeded",
+    )
+
+
 # user_id -> (percent used, free chars left): set by translate_text_async when a
 # translation crosses a warning point, consumed by append_quota_warning.
 quota_usage_warnings: dict[int, tuple[int, int]] = {}
@@ -3562,6 +3591,13 @@ class LanguageSelectView(discord.ui.View):
             billable_char_count(self.original_message.content),
         )
         if not quota_allowed:
+            emit_quota_denied_event(
+                interaction,
+                source="language_select_button",
+                target_lang=self.selected_lang,
+                char_count=billable_char_count(self.original_message.content),
+                decision=quota_decision,
+            )
             await send_response(
                 interaction,
                 content=format_quota_denial(interaction.locale, quota_decision),
@@ -3596,8 +3632,9 @@ class LanguageSelectView(discord.ui.View):
                 guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                 channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                 target_lang=self.selected_lang,
-                char_count=len(self.original_message.content or ""),
-                success=True,
+                char_count=billable_char_count(self.original_message.content),
+                success=not is_translation_error_text(translated_text),
+                error_code="translation_failed" if is_translation_error_text(translated_text) else None,
             )
             
             # Edit the ephemeral message to show the translation as plain text.
@@ -3614,7 +3651,7 @@ class LanguageSelectView(discord.ui.View):
                 guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                 channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                 target_lang=self.selected_lang,
-                char_count=len(getattr(self.original_message, "content", "") or ""),
+                char_count=billable_char_count(getattr(self.original_message, "content", "")),
                 success=False,
                 error_code=normalize_analytics_error_code(e),
             )
@@ -3652,7 +3689,7 @@ class TranslateButtonView(discord.ui.View):
                 guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                 channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                 target_lang=target_lang,
-                char_count=message_length,
+                char_count=billable_char_count(original_message.content) if original_message else 0,
                 success=False,
                 error_code="rate_limited",
             )
@@ -3750,6 +3787,13 @@ class TranslateButtonView(discord.ui.View):
                 billable_char_count(original_message.content),
             )
             if not quota_allowed:
+                emit_quota_denied_event(
+                    interaction,
+                    source="button",
+                    target_lang=target_lang,
+                    char_count=billable_char_count(original_message.content),
+                    decision=quota_decision,
+                )
                 await send_response(
                     interaction,
                     content=format_quota_denial(interaction.locale, quota_decision),
@@ -3793,7 +3837,7 @@ class TranslateButtonView(discord.ui.View):
                     guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                     channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                     target_lang=target_lang,
-                    char_count=len(original_message.content or ""),
+                    char_count=billable_char_count(original_message.content),
                     success=False,
                     error_code=normalize_analytics_error_code(translate_exc),
                 )
@@ -3807,8 +3851,9 @@ class TranslateButtonView(discord.ui.View):
                 guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                 channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                 target_lang=target_lang,
-                char_count=len(original_message.content or ""),
-                success=True,
+                char_count=billable_char_count(original_message.content),
+                success=not is_translation_error_text(translated_text),
+                error_code="translation_failed" if is_translation_error_text(translated_text) else None,
             )
 
             # Replace the "Translating..." message with the translation
@@ -3826,7 +3871,7 @@ class TranslateButtonView(discord.ui.View):
                 guild_id=getattr(getattr(interaction, "guild", None), "id", None),
                 channel_id=getattr(getattr(interaction, "channel", None), "id", None),
                 target_lang=target_lang,
-                char_count=len(getattr(original_message, "content", "") or "") if 'original_message' in locals() else 0,
+                char_count=billable_char_count(getattr(original_message, "content", "")) if 'original_message' in locals() else 0,
                 success=False,
                 error_code=normalize_analytics_error_code(e),
             )
@@ -4200,7 +4245,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
             guild_id=getattr(getattr(interaction, "guild", None), "id", None),
             channel_id=getattr(getattr(interaction, "channel", None), "id", None),
             target_lang=target_lang,
-            char_count=len(message.content or ""),
+            char_count=billable_char_count(message.content),
             success=False,
             error_code="rate_limited",
         )
@@ -4260,6 +4305,13 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         billable_char_count(message.content),
     )
     if not quota_allowed:
+        emit_quota_denied_event(
+            interaction,
+            source="context_menu",
+            target_lang=target_lang,
+            char_count=billable_char_count(message.content),
+            decision=quota_decision,
+        )
         await send_response(
             interaction,
             content=format_quota_denial(interaction.locale, quota_decision),
@@ -4288,8 +4340,9 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
             guild_id=getattr(getattr(interaction, "guild", None), "id", None),
             channel_id=getattr(getattr(interaction, "channel", None), "id", None),
             target_lang=target_lang,
-            char_count=len(message.content or ""),
-            success=True,
+            char_count=billable_char_count(message.content),
+            success=not is_translation_error_text(translated_text),
+            error_code="translation_failed" if is_translation_error_text(translated_text) else None,
         )
 
         # ephemeral=True ensures ONLY the user who clicked 'Translate' sees this result
@@ -4306,7 +4359,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
             guild_id=getattr(getattr(interaction, "guild", None), "id", None),
             channel_id=getattr(getattr(interaction, "channel", None), "id", None),
             target_lang=target_lang,
-            char_count=len(message.content or ""),
+            char_count=billable_char_count(message.content),
             success=False,
             error_code=normalize_analytics_error_code(e),
         )
